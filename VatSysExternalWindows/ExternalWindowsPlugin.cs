@@ -8,7 +8,7 @@ namespace VatSysExternalWindows;
 [Export(typeof(IPlugin))]
 public sealed class ExternalWindowsPlugin : IPlugin, IDisposable
 {
-    private const int WebPort = 5200;
+    private const int WebPort = 5300;
 
     private readonly GroundDataService _data;
     private readonly EmbeddedWebServer _server;

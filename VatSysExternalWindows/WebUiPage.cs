@@ -11,24 +11,37 @@ public static class WebUiPage
 <meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>
 <title>Ground</title>
 <style>
+@font-face{font-family:'Terminus';src:local('Terminus (TTF)'),local('Terminus'),local('Terminus (TTF) for Windows'),local('TerminusTTF'),local('TerminusTTFWindows');font-weight:bold;}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}
-html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:Consolas,'Courier New',monospace;color:#ccc;}
+html,body{width:100%;height:100%;overflow:hidden;background:rgb(105,105,105);font-family:'Terminus','Consolas','Courier New',monospace;color:rgb(0,0,96);}
 body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);display:flex;flex-direction:column;}
-#menubar{display:flex;background:#333;border-bottom:1px solid #555;height:36px;align-items:center;flex-shrink:0;position:relative;z-index:100;}
-.menu-btn{background:none;border:none;color:#ccc;font:13px Consolas,'Courier New',monospace;padding:0 14px;height:100%;cursor:pointer;position:relative;}
-.menu-btn:hover,.menu-btn.active{background:#555;}
-.dropdown{display:none;position:absolute;top:36px;left:0;background:#333;border:1px solid #555;min-width:180px;z-index:200;max-height:70vh;overflow-y:auto;-webkit-overflow-scrolling:touch;}
+
+/* MenuStrip: vatSys WindowBackground + Border3DStyle.RaisedOuter, eurofont_winsml=16px */
+#menubar{display:flex;background:rgb(160,170,170);height:25px;align-items:stretch;flex-shrink:0;position:relative;z-index:100;padding:3px 0 3px 8px;
+  border-top:1px solid rgb(210,218,218);border-left:1px solid rgb(210,218,218);border-bottom:1px solid rgb(100,108,108);border-right:1px solid rgb(100,108,108);}
+
+.menu-wrap{position:relative;}
+.menu-btn{background:rgb(160,170,170);border:none;color:rgb(0,0,96);font:bold 16px 'Terminus','Consolas',monospace;padding:0 8px;cursor:pointer;position:relative;height:100%;line-height:19px;}
+.menu-btn:hover{background:rgb(130,146,146);}
+.menu-btn.active{background:rgb(130,146,146);border-top:1px solid rgb(100,108,108);border-left:1px solid rgb(100,108,108);border-bottom:1px solid rgb(210,218,218);border-right:1px solid rgb(210,218,218);}
+
+.dropdown{display:none;position:absolute;top:25px;left:0;background:rgb(160,170,170);min-width:180px;z-index:200;max-height:70vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  border-top:1px solid rgb(210,218,218);border-left:1px solid rgb(210,218,218);border-bottom:1px solid rgb(100,108,108);border-right:1px solid rgb(100,108,108);}
 .dropdown.show{display:block;}
-.dd-item{display:flex;align-items:center;padding:8px 14px 8px 8px;font:13px Consolas,'Courier New',monospace;color:#ccc;cursor:pointer;white-space:nowrap;min-height:36px;}
-.dd-item:hover{background:#555;}
-.dd-item .chk{width:20px;text-align:center;flex-shrink:0;font-size:12px;}
-.dd-sep{height:1px;background:#555;margin:2px 0;}
-.dd-hdr{padding:6px 14px 4px 8px;font:bold 11px Consolas,'Courier New',monospace;color:#999;text-transform:uppercase;letter-spacing:0.5px;}
-.dd-sub{position:relative;}
-.dd-sub>.sub-menu{display:none;position:absolute;left:100%;top:0;background:#333;border:1px solid #555;min-width:160px;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;}
-.dd-sub:hover>.sub-menu,.dd-sub.touch-open>.sub-menu{display:block;}
-.dd-sub>.dd-item::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;}
-#title-text{margin-left:16px;font:13px Consolas,'Courier New',monospace;color:#aaa;flex:1;text-align:right;padding-right:14px;}
+
+.dd-item{display:flex;align-items:center;padding:2px 16px 2px 4px;font:bold 16px 'Terminus','Consolas',monospace;color:rgb(0,0,96);cursor:pointer;white-space:nowrap;min-height:22px;}
+.dd-item:hover{background:rgb(130,146,146);}
+.dd-item.disabled{color:rgb(96,0,0);cursor:default;}
+.dd-item.disabled:hover{background:transparent;}
+.dd-item .chk{width:22px;text-align:center;flex-shrink:0;font-size:14px;}
+.dd-sep{height:1px;background:rgb(120,128,128);margin:1px 2px;}
+
+/* Folder submenus - inline accordion style (touch-friendly) */
+.dd-sub>.sub-menu{display:none;padding-left:16px;}
+.dd-sub.open>.sub-menu{display:block;}
+.dd-sub>.dd-item::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;display:inline-block;transition:transform 0.15s;}
+.dd-sub.open>.dd-item::after{transform:rotate(90deg);}
+
 canvas{flex:1;display:block;touch-action:none;}
 </style>
 </head>
@@ -45,101 +58,150 @@ canvas{flex:1;display:block;touch-action:none;}
   <div class='menu-wrap' id='mw-tools'>
     <button class='menu-btn' id='btn-tools'>Tools</button>
     <div class='dropdown' id='dd-tools'>
-      <div class='dd-item'>Bearing Range Line</div>
-      <div class='dd-item'>Contact Me</div>
-      <div class='dd-item'>Decouple</div>
+      <div class='dd-item disabled'>Bearing Range Line</div>
+      <div class='dd-item disabled'>Contact Me</div>
+      <div class='dd-item disabled'>Decouple</div>
     </div>
   </div>
-  <span id='title-text'>Ground</span>
 </div>
 <canvas id='cv'></canvas>
 <script>
 'use strict';
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
 let W=0,H=0,dpr=1;
-let mapData=null,colours=null,positions=[],selectedPos=null;
+
+/* ============================================================
+   State
+   ============================================================ */
+let positions=[];
+let allGroundMaps=[];
+let colours=null;
+let selectedPos=null;
+
 let centerLat=0,centerLon=0,rotation=0,magVar=0,nmRange=2;
 let panX=0,panY=0;
-let layerVisible={};
+
+// key = 'Folder/Name', value = { visible: bool, layer: MapLayer|null }
+let layerState={};
 let aircraft=[];
 let acTimer=null;
 
-// --- Symbol geometry from Tracks.xml (exact vatSys shapes) ---
-// Each is [points], filled, with coordinates relative to center, rotated to heading.
-// StrokeWidth 0 = filled, 1 = stroked outline.
+/* ============================================================
+   Symbol geometry - exact from Tracks.xml
+   Ground: StrokeWidth=1, FigureBegin=Filled → filled + 1px stroke
+   GroundLight/Medium/Heavy/Super: StrokeWidth=0, FigureBegin=Filled → filled only
+   ============================================================ */
 const SYMBOLS={
-  Ground:     {pts:[[0,-7.5],[-5.5,3.5],[0,7.5],[5.5,3.5]], stroke:1, fill:false},
-  GroundLight:{pts:[[0,-5.5],[-3.5,1.5],[0,5.5],[3.5,1.5]], stroke:0, fill:true},
-  GroundMedium:{pts:[[0,-7.5],[-5.5,3.5],[0,7.5],[5.5,3.5]], stroke:0, fill:true},
-  GroundHeavy:{pts:[[0,-9],[-7,5],[0,9],[7,5]], stroke:0, fill:true},
-  GroundSuper:{pts:[[0,-10],[-9,6.5],[0,10],[9,6.5]], stroke:0, fill:true},
-  HistoryDot: {radius:2}
+  Ground:      {pts:[[0,-7.5],[-5.5,3.5],[0,7.5],[5.5,3.5]], sw:1},
+  GroundLight: {pts:[[0,-5.5],[-3.5,1.5],[0,5.5],[3.5,1.5]], sw:0},
+  GroundMedium:{pts:[[0,-7.5],[-5.5,3.5],[0,7.5],[5.5,3.5]], sw:0},
+  GroundHeavy: {pts:[[0,-9],[-7,5],[0,9],[7,5]], sw:0},
+  GroundSuper: {pts:[[0,-10],[-9,6.5],[0,10],[9,6.5]], sw:0}
 };
-
-function wakeSymbol(wake){
-  switch((wake||'').toUpperCase()){
-    case 'L': return SYMBOLS.GroundLight;
-    case 'M': return SYMBOLS.GroundMedium;
-    case 'H': return SYMBOLS.GroundHeavy;
-    case 'J': return SYMBOLS.GroundSuper;
-    default:  return SYMBOLS.Ground;
+function wakeSymbol(w){
+  switch((w||'').toUpperCase()){
+    case'L':return SYMBOLS.GroundLight;
+    case'M':return SYMBOLS.GroundMedium;
+    case'H':return SYMBOLS.GroundHeavy;
+    case'J':return SYMBOLS.GroundSuper;
+    default:return SYMBOLS.Ground;
   }
 }
 
-// --- Coordinate conversion ---
+/* ============================================================
+   Coordinate conversion
+   ============================================================ */
 const NM_TO_DEG_LAT=1/60;
 function nmToDegLon(lat){return 1/(60*Math.cos(lat*Math.PI/180));}
-
 function latLonToCanvas(lat,lon){
-  let dlat=lat-centerLat, dlon=lon-centerLon;
-  let xNm=dlon/nmToDegLon(centerLat), yNm=dlat/NM_TO_DEG_LAT;
+  let dlat=lat-centerLat,dlon=lon-centerLon;
+  let xNm=dlon/nmToDegLon(centerLat),yNm=dlat/NM_TO_DEG_LAT;
   let scale=Math.min(W,H)/(nmRange*2);
-  let rx=xNm*scale, ry=-yNm*scale;
-  // vatSys applies Rotation + MagneticVariation as total rotation
+  let rx=xNm*scale,ry=-yNm*scale;
   let totalRot=rotation+magVar;
   let rad=totalRot*Math.PI/180;
   let cx=rx*Math.cos(rad)-ry*Math.sin(rad);
   let cy=rx*Math.sin(rad)+ry*Math.cos(rad);
-  return [W/2+panX+cx, H/2+panY+cy];
+  return[W/2+panX+cx,H/2+panY+cy];
 }
 
-// --- Colours ---
-function rgb(arr){return 'rgb('+arr[0]+','+arr[1]+','+arr[2]+')';}
-function rgba(arr,a){return 'rgba('+arr[0]+','+arr[1]+','+arr[2]+','+a+')';}
+/* ============================================================
+   Colours
+   ============================================================ */
+function rgb(a){return'rgb('+a[0]+','+a[1]+','+a[2]+')';}
+
+function applyTheme(){
+  if(!colours) return;
+  let wb=colours.WindowBackground;
+  let dp=colours.DepressedButton;
+  let it=colours.InteractiveText;
+  let gt=colours.GenericText;
+  if(!wb) return;
+  let c=rgb(wb);
+  let hi='rgb('+Math.min(255,wb[0]+50)+','+Math.min(255,wb[1]+48)+','+Math.min(255,wb[2]+48)+')';
+  let sh='rgb('+Math.max(0,wb[0]-60)+','+Math.max(0,wb[1]-62)+','+Math.max(0,wb[2]-62)+')';
+  let textCol=it?rgb(it):'rgb(0,0,96)';
+  let disabledCol=gt?rgb(gt):'rgb(96,0,0)';
+  let depCol=dp?rgb(dp):c;
+  let style=document.getElementById('theme-overrides');
+  if(!style){style=document.createElement('style');style.id='theme-overrides';document.head.appendChild(style);}
+  style.textContent=
+    'html,body{color:'+textCol+';}'+
+    '#menubar{background:'+c+';border-top-color:'+hi+';border-left-color:'+hi+';border-bottom-color:'+sh+';border-right-color:'+sh+';}'+
+    '.menu-btn{background:'+c+';color:'+textCol+';}'+
+    '.menu-btn:hover{background:'+depCol+';}'+
+    '.menu-btn.active{background:'+depCol+';border-top-color:'+sh+';border-left-color:'+sh+';border-bottom-color:'+hi+';border-right-color:'+hi+';}'+
+    '.dropdown{background:'+c+';border-top-color:'+hi+';border-left-color:'+hi+';border-bottom-color:'+sh+';border-right-color:'+sh+';}'+
+    '.dd-item{color:'+textCol+';}'+
+    '.dd-item:hover{background:'+depCol+';}'+
+    '.dd-item.disabled{color:'+disabledCol+';}';
+}
+
 function typeColour(type){
-  if(!colours) return '#888';
+  if(!colours) return'#888';
   let t=(type||'').toLowerCase();
   if(t.includes('rwy')) return rgb(colours.Runway);
   if(t.includes('twy')) return rgb(colours.Taxiway);
   if(t.includes('apr')) return rgb(colours.Apron);
   if(t.includes('bld')) return rgb(colours.Building);
-  if(t.includes('inf')) return rgb(colours.Other);
   return rgb(colours.Other);
 }
 function catColour(cat){
-  if(!colours) return '#fff';
+  if(!colours) return'#fff';
   if(cat==='arrival') return rgb(colours.Arrival);
   if(cat==='departure') return rgb(colours.Departure);
   if(cat==='local') return rgb(colours.Local);
   return rgb(colours.Unknown);
 }
 
-// --- Rendering ---
+/* ============================================================
+   Layer key
+   ============================================================ */
+function layerKey(folder,name){return folder?(folder+'/'+name):name;}
+
+/* ============================================================
+   Rendering
+   ============================================================ */
 let renderPending=false;
-function scheduleRender(){
-  if(!renderPending){renderPending=true;requestAnimationFrame(()=>{renderPending=false;render();});}
-}
+function scheduleRender(){if(!renderPending){renderPending=true;requestAnimationFrame(()=>{renderPending=false;render();});}}
 
 function render(){
   ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.fillStyle=colours?rgb(colours.Background):'#696969';
+  ctx.fillStyle=colours?rgb(colours.Background):'rgb(105,105,105)';
   ctx.fillRect(0,0,W,H);
-  if(!mapData) return;
-  // Draw layers in priority order
-  for(let layer of mapData.Layers){
-    let key=layer.Folder+'|'+layer.Name;
-    if(layerVisible[key]===false) continue;
+
+  let visibleLayers=[];
+  for(let key in layerState){
+    let ls=layerState[key];
+    if(ls.visible&&ls.layer) visibleLayers.push(ls);
+  }
+  // Priority descending: highest priority drawn first (behind)
+  visibleLayers.sort((a,b)=>(b.layer.Priority||0)-(a.layer.Priority||0));
+
+  for(let ls of visibleLayers){
+    let layer=ls.layer;
     let col=typeColour(layer.Type);
+
     // Infills
     ctx.fillStyle=col;
     for(let inf of layer.Infills){
@@ -147,304 +209,439 @@ function render(){
       ctx.beginPath();
       let p0=latLonToCanvas(inf.Points[0][0],inf.Points[0][1]);
       ctx.moveTo(p0[0],p0[1]);
-      for(let i=1;i<inf.Points.length;i++){
-        let p=latLonToCanvas(inf.Points[i][0],inf.Points[i][1]);
-        ctx.lineTo(p[0],p[1]);
-      }
-      ctx.closePath();
-      ctx.fill();
+      for(let i=1;i<inf.Points.length;i++){let p=latLonToCanvas(inf.Points[i][0],inf.Points[i][1]);ctx.lineTo(p[0],p[1]);}
+      ctx.closePath();ctx.fill();
     }
+
     // Lines
-    ctx.strokeStyle=col;
-    ctx.lineWidth=1;
+    ctx.strokeStyle=col;ctx.lineWidth=1;ctx.lineJoin='round';ctx.lineCap='round';
     for(let ln of layer.Lines){
       if(ln.Points.length<2) continue;
       ctx.beginPath();
       let p0=latLonToCanvas(ln.Points[0][0],ln.Points[0][1]);
       ctx.moveTo(p0[0],p0[1]);
-      for(let i=1;i<ln.Points.length;i++){
-        let p=latLonToCanvas(ln.Points[i][0],ln.Points[i][1]);
-        ctx.lineTo(p[0],p[1]);
-      }
+      for(let i=1;i<ln.Points.length;i++){let p=latLonToCanvas(ln.Points[i][0],ln.Points[i][1]);ctx.lineTo(p[0],p[1]);}
       ctx.stroke();
     }
-    // Labels
-    ctx.fillStyle=colours?rgb(colours.Other):'#999';
-    ctx.font='9px Consolas,monospace';
-    ctx.textAlign='center';
-    ctx.textBaseline='middle';
-    for(let lb of layer.Labels){
-      let p=latLonToCanvas(lb.Lat,lb.Lon);
-      ctx.fillText(lb.Text,p[0],p[1]);
-    }
+
+    // Map labels - eurofont_xsml = 16px Terminus bold
+    ctx.fillStyle=colours?rgb(colours.Other):'rgb(150,150,150)';
+    ctx.font=""bold 16px 'Terminus','Consolas',monospace"";
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    for(let lb of layer.Labels){let p=latLonToCanvas(lb.Lat,lb.Lon);ctx.fillText(lb.Text,p[0],p[1]);}
   }
-  // Aircraft
-  for(let ac of aircraft){
-    drawAircraft(ac);
-  }
+
+  for(let ac of aircraft) drawAircraft(ac);
 }
+
+/* ============================================================
+   Aircraft rendering - matches vatSys PaintGroundTracks exactly
+   Ground symbols: FigureBegin=Filled diamond, wake-category sized.
+   Ground default StrokeWidth=1 → filled + 1px outline.
+   GroundLight/Medium/Heavy/Super StrokeWidth=0 → filled only.
+   Airborne (OnGround=false): ModeS circle (6.5px radius, filled).
+   NO velocity vector for ground tracks (vatSys doesn't render them).
+   Leader line: Direction=1 (22.5° NE), Length=1 (40px).
+   Label font: eurofont_sml = 18px Terminus bold.
+   History dots: 2px radius filled circles at past positions.
+   ============================================================ */
+const LABEL_DIR=1,LABEL_LEN=1;
+const LABEL_ANGLE=LABEL_DIR*22.5;
+const LEADER_PX=LABEL_LEN*35+5;
 
 function drawAircraft(ac){
   let p=latLonToCanvas(ac.Lat,ac.Lon);
   let col=catColour(ac.Category);
-  let sym=wakeSymbol(ac.WakeCat);
-  // Heading: vatSys rotates symbol to track heading, offset by map rotation
-  let totalRot=rotation+magVar;
-  let hdgRad=(ac.Hdg+totalRot)*Math.PI/180;
 
-  ctx.save();
-  ctx.translate(p[0],p[1]);
-  ctx.rotate(hdgRad);
-
-  // Draw the chevron symbol
-  let pts=sym.pts;
-  ctx.beginPath();
-  ctx.moveTo(pts[0][0],pts[0][1]);
-  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
-  ctx.closePath();
-  if(sym.fill){
+  // History trail dots (2px radius filled circles)
+  if(ac.History&&ac.History.length>0){
     ctx.fillStyle=col;
-    ctx.fill();
-  } else {
-    ctx.strokeStyle=col;
-    ctx.lineWidth=sym.stroke||1;
-    ctx.stroke();
+    for(let h of ac.History){
+      let hp=latLonToCanvas(h[0],h[1]);
+      ctx.beginPath();ctx.arc(hp[0],hp[1],2,0,Math.PI*2);ctx.fill();
+    }
   }
 
-  // Heading line (velocity vector) extending from nose
-  let topY=pts[0][1]; // top of symbol (negative Y = up)
-  ctx.strokeStyle=col;
-  ctx.lineWidth=1;
-  ctx.beginPath();
-  ctx.moveTo(0,topY);
-  // Length proportional to ground speed (1px per knot, min 15px)
-  let lineLen=Math.max(15, ac.Gs*0.8);
-  ctx.lineTo(0,topY-lineLen);
-  ctx.stroke();
+  let hdgRad=(ac.Hdg+rotation+magVar)*Math.PI/180;
 
-  ctx.restore();
+  if(ac.OnGround){
+    // Ground symbol: wake-category diamond
+    let sym=wakeSymbol(ac.WakeCat);
+    ctx.save();
+    ctx.translate(p[0],p[1]);
+    ctx.rotate(hdgRad);
+    let pts=sym.pts;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle=col;ctx.fill();
+    if(sym.sw>0){ctx.strokeStyle=col;ctx.lineWidth=sym.sw;ctx.stroke();}
+    ctx.restore();
+  }else{
+    // Airborne symbol: ModeS circle (6.5px radius)
+    ctx.beginPath();ctx.arc(p[0],p[1],6.5,0,Math.PI*2);
+    ctx.strokeStyle=col;ctx.lineWidth=1;ctx.stroke();
+  }
 
-  // --- Label (tag) ---
-  // vatSys Ground label format:
-  //   Departure: [RWY] / Callsign / AircraftType WakeCat
-  //   Arrival:   Callsign / AircraftType WakeCat
+  // Leader line
+  let rad=LABEL_ANGLE*Math.PI/180;
+  let lx=p[0]+LEADER_PX*Math.cos(rad),ly=p[1]+LEADER_PX*Math.sin(rad);
+  ctx.strokeStyle=col;ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(lx,ly);ctx.stroke();
+
+  // Label - eurofont_sml = 18px Terminus bold (ASDMainFont default)
   ctx.fillStyle=col;
-  ctx.font='10px Consolas,monospace';
-  ctx.textAlign='left';
+  ctx.font=""bold 18px 'Terminus','Consolas',monospace"";
+  let fontH=18;
+  let isWest=LABEL_DIR>4&&LABEL_DIR<12;
+  ctx.textAlign=isWest?'right':'left';
   ctx.textBaseline='top';
-  let lx=p[0]+12, ly=p[1]-8;
-  let line1=ac.Callsign||'';
-  let line2='';
-  if(ac.AircraftType){
-    line2=ac.AircraftType;
-    if(ac.WakeCat) line2+=' '+ac.WakeCat;
+  let labelY=ly;
+
+  // Label lines per Labels.xml ground label types
+  let lines=[];
+  if(!ac.OnGround){
+    // GroundAir: RWY / ACID / ATYPE WakeCat / Level GS
+    if(ac.Runway) lines.push(ac.Runway);
+    if(ac.Callsign) lines.push(ac.Callsign);
+    if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
+    let lvl='';if(ac.Gs>0)lvl=Math.round(ac.Gs)+'';if(lvl)lines.push(lvl);
+  }else if(ac.Category==='departure'){
+    // GroundDeparture: RWY / ACID / ATYPE WakeCat
+    if(ac.Runway) lines.push(ac.Runway);
+    if(ac.Callsign) lines.push(ac.Callsign);
+    if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
+  }else if(ac.Category==='arrival'){
+    // GroundArrival: Bay / ACID / ATYPE WakeCat
+    if(ac.Bay) lines.push(ac.Bay);
+    if(ac.Callsign) lines.push(ac.Callsign);
+    if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
+  }else{
+    // GroundLimited: callsign only
+    if(ac.Callsign) lines.push(ac.Callsign);
   }
-  if(ac.Category==='departure'&&ac.Runway){
-    ctx.fillText(ac.Runway,lx,ly);
-    ly+=12;
-  }
-  ctx.fillText(line1,lx,ly);
-  if(line2){ly+=12;ctx.fillText(line2,lx,ly);}
+
+  for(let i=0;i<lines.length;i++) ctx.fillText(lines[i],lx,labelY+i*fontH);
 }
 
-// --- Resize ---
+/* ============================================================
+   Resize
+   ============================================================ */
 function resize(){
   dpr=window.devicePixelRatio||1;
   let rect=cv.getBoundingClientRect();
-  W=rect.width; H=rect.height;
-  cv.width=W*dpr; cv.height=H*dpr;
+  W=rect.width;H=rect.height;
+  cv.width=W*dpr;cv.height=H*dpr;
   render();
 }
 window.addEventListener('resize',resize);
 
-// --- Touch / Mouse ---
-let pointers=new Map();
-let lastDist=0,lastMid=null,isPanning=false;
-
+/* ============================================================
+   Touch / Mouse - pan, pinch-zoom, scroll-zoom
+   ============================================================ */
+let pointers=new Map(),panLast=null,pinchLast=null;
 cv.addEventListener('pointerdown',e=>{
   cv.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
-  if(pointers.size===1){isPanning=true;lastMid={x:e.clientX,y:e.clientY};}
-  if(pointers.size===2){
-    let pts=[...pointers.values()];
-    lastDist=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);
-    lastMid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2};
-  }
+  if(pointers.size===1){panLast={x:e.clientX,y:e.clientY};pinchLast=null;}
+  else if(pointers.size===2){panLast=null;let pts=[...pointers.values()];pinchLast={dist:Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y),mx:(pts[0].x+pts[1].x)/2,my:(pts[0].y+pts[1].y)/2};}
 });
 cv.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
-  if(pointers.size===1&&isPanning){
-    let pt=pointers.get(e.pointerId);
-    panX+=pt.x-lastMid.x;
-    panY+=pt.y-lastMid.y;
-    lastMid={x:pt.x,y:pt.y};
-    scheduleRender();
-  }
-  if(pointers.size===2){
+  if(pointers.size===1&&panLast){
+    let pt=[...pointers.values()][0];
+    panX+=pt.x-panLast.x;panY+=pt.y-panLast.y;
+    panLast={x:pt.x,y:pt.y};scheduleRender();
+  }else if(pointers.size===2&&pinchLast){
     let pts=[...pointers.values()];
-    let d=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);
-    if(lastDist>0){
-      nmRange*=lastDist/d;
-      nmRange=Math.max(0.1,Math.min(50,nmRange));
+    let dist=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);
+    let mx=(pts[0].x+pts[1].x)/2,my=(pts[0].y+pts[1].y)/2;
+    if(pinchLast.dist>10){
+      let sf=pinchLast.dist/dist;
+      let rect=cv.getBoundingClientRect();
+      let cx=pinchLast.mx-rect.left-W/2,cy=pinchLast.my-rect.top-H/2;
+      panX=cx+(panX-cx)/sf+(mx-pinchLast.mx);
+      panY=cy+(panY-cy)/sf+(my-pinchLast.my);
+      nmRange*=sf;nmRange=Math.max(0.1,Math.min(50,nmRange));
     }
-    lastDist=d;
-    let mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2};
-    panX+=mid.x-lastMid.x;
-    panY+=mid.y-lastMid.y;
-    lastMid=mid;
-    scheduleRender();
+    pinchLast={dist:dist,mx:mx,my:my};scheduleRender();
   }
 });
-cv.addEventListener('pointerup',e=>{pointers.delete(e.pointerId);if(pointers.size<2)lastDist=0;if(pointers.size===0)isPanning=false;});
-cv.addEventListener('pointercancel',e=>{pointers.delete(e.pointerId);if(pointers.size<2)lastDist=0;if(pointers.size===0)isPanning=false;});
+cv.addEventListener('pointerup',e=>{
+  pointers.delete(e.pointerId);
+  if(pointers.size===1){let pt=[...pointers.values()][0];panLast={x:pt.x,y:pt.y};pinchLast=null;}
+  else if(pointers.size===0){panLast=null;pinchLast=null;}
+});
+cv.addEventListener('pointercancel',e=>{
+  pointers.delete(e.pointerId);
+  if(pointers.size===1){let pt=[...pointers.values()][0];panLast={x:pt.x,y:pt.y};pinchLast=null;}
+  else if(pointers.size===0){panLast=null;pinchLast=null;}
+});
 cv.addEventListener('wheel',e=>{
   e.preventDefault();
-  nmRange*=e.deltaY>0?1.15:0.87;
-  nmRange=Math.max(0.1,Math.min(50,nmRange));
+  let sf=e.deltaY>0?1.15:0.87;
+  let rect=cv.getBoundingClientRect();
+  let cx=e.clientX-rect.left-W/2,cy=e.clientY-rect.top-H/2;
+  panX=cx+(panX-cx)/sf;panY=cy+(panY-cy)/sf;
+  nmRange*=sf;nmRange=Math.max(0.1,Math.min(50,nmRange));
   scheduleRender();
 },{passive:false});
+cv.addEventListener('dblclick',e=>{e.preventDefault();panX=0;panY=0;if(selectedPos)nmRange=selectedPos.DefaultRange||2;scheduleRender();});
 
-// --- Menus ---
+/* ============================================================
+   Menu system
+   Dropdown behavior matches vatSys:
+   - Position & Tools: close on item click
+   - Maps: stays open on item click (MapsDropDown_Closing cancel)
+   - Folder submenus: expand on hover (desktop) or tap (touch)
+   ============================================================ */
 const btnPos=document.getElementById('btn-pos'),ddPos=document.getElementById('dd-pos');
 const btnMaps=document.getElementById('btn-maps'),ddMaps=document.getElementById('dd-maps');
 const btnTools=document.getElementById('btn-tools'),ddTools=document.getElementById('dd-tools');
-const titleText=document.getElementById('title-text');
 let openDD=null;
 
 function closeAllDD(){
   document.querySelectorAll('.dropdown').forEach(d=>d.classList.remove('show'));
   document.querySelectorAll('.menu-btn').forEach(b=>b.classList.remove('active'));
-  document.querySelectorAll('.dd-sub').forEach(s=>s.classList.remove('touch-open'));
+  closeAllSubs();
   openDD=null;
 }
+
+function closeAllSubs(){
+  document.querySelectorAll('.dd-sub.open').forEach(s=>s.classList.remove('open'));
+}
+
 function toggleDD(btn,dd){
   if(openDD===dd){closeAllDD();return;}
   closeAllDD();
-  dd.classList.add('show');btn.classList.add('active');openDD=dd;
+  dd.classList.add('show');
+  btn.classList.add('active');
+  openDD=dd;
 }
+
 btnPos.addEventListener('click',e=>{e.stopPropagation();toggleDD(btnPos,ddPos);});
 btnMaps.addEventListener('click',e=>{e.stopPropagation();toggleDD(btnMaps,ddMaps);});
 btnTools.addEventListener('click',e=>{e.stopPropagation();toggleDD(btnTools,ddTools);});
+
+// Global click: close dropdowns unless clicking inside Maps (which stays open)
 document.addEventListener('click',e=>{
-  // Maps dropdown stays open when clicking items inside it (vatSys behaviour)
-  if(openDD===ddMaps&&document.getElementById('mw-maps').contains(e.target)) return;
+  if(!openDD) return;
+  // Check if click is inside any dropdown or menu bar
+  let inMenubar=document.getElementById('menubar').contains(e.target);
+  if(inMenubar) return; // handled by button handlers
   closeAllDD();
 });
 
-// --- Position menu ---
+/* ============================================================
+   Position menu
+   ============================================================ */
 function buildPositionMenu(){
   ddPos.innerHTML='';
-  // 'Free' item first
-  let freeItem=mkItem('\u2713', selectedPos===null, 'Free');
+  let freeItem=mkItem('\u2713',selectedPos===null,'Free');
   freeItem.addEventListener('click',()=>{selectPosition(null);closeAllDD();});
   ddPos.appendChild(freeItem);
 
-  // Ungrouped positions first
-  let ungrouped=positions.filter(p=>!p.Group);
-  let groups={};
-  positions.forEach(p=>{if(p.Group){if(!groups[p.Group])groups[p.Group]=[];groups[p.Group].push(p);}});
-
-  if(ungrouped.length>0){
-    ddPos.appendChild(mkSep());
-    ungrouped.forEach(p=>ddPos.appendChild(mkPosItem(p)));
-  }
-  // Grouped positions
+  let groups={},ungrouped=[];
+  positions.forEach(p=>{
+    if(p.Group&&p.Group.trim()){if(!groups[p.Group])groups[p.Group]=[];groups[p.Group].push(p);}
+    else ungrouped.push(p);
+  });
   let groupNames=Object.keys(groups).sort();
   for(let gn of groupNames){
-    ddPos.appendChild(mkSep());
-    let hdr=document.createElement('div');
-    hdr.className='dd-hdr';
-    hdr.textContent=gn;
-    ddPos.appendChild(hdr);
-    groups[gn].forEach(p=>ddPos.appendChild(mkPosItem(p)));
+    let sub=document.createElement('div');sub.className='dd-sub';
+    let trigger=document.createElement('div');trigger.className='dd-item';
+    let chkSpan=document.createElement('span');chkSpan.className='chk';chkSpan.textContent='';
+    trigger.appendChild(chkSpan);trigger.appendChild(document.createTextNode(gn));
+    sub.appendChild(trigger);
+    // Toggle submenu on click/tap
+    trigger.addEventListener('click',e=>{
+      e.stopPropagation();
+      let isOpen=sub.classList.contains('open');
+      // Close sibling submenus first
+      sub.parentElement.querySelectorAll(':scope > .dd-sub.open').forEach(s=>{if(s!==sub)s.classList.remove('open');});
+      sub.classList.toggle('open',!isOpen);
+    });
+    let subMenu=document.createElement('div');subMenu.className='sub-menu';
+    groups[gn].sort((a,b)=>a.Name.localeCompare(b.Name));
+    groups[gn].forEach(p=>subMenu.appendChild(mkPosItem(p)));
+    sub.appendChild(subMenu);
+    ddPos.appendChild(sub);
   }
+  ungrouped.sort((a,b)=>a.Name.localeCompare(b.Name));
+  ungrouped.forEach(p=>ddPos.appendChild(mkPosItem(p)));
 }
 
 function mkPosItem(p){
-  let item=mkItem('\u2713', selectedPos&&selectedPos.Name===p.Name, p.Name);
-  item.addEventListener('click',(()=>{let pp=p;return()=>{selectPosition(pp);closeAllDD();}})());
+  let item=mkItem('\u2713',selectedPos&&selectedPos.Name===p.Name,p.Name);
+  item.addEventListener('click',e=>{
+    e.stopPropagation();
+    selectPosition(p);
+    closeAllDD();
+  });
   return item;
 }
 
-function mkItem(checkChar, checked_, text){
-  let item=document.createElement('div');
-  item.className='dd-item';
-  let chk=document.createElement('span');
-  chk.className='chk';
-  chk.textContent=checked_?checkChar:'';
-  item.appendChild(chk);
-  item.appendChild(document.createTextNode(text));
+function mkItem(chkChar,checked_,text){
+  let item=document.createElement('div');item.className='dd-item';
+  let chk=document.createElement('span');chk.className='chk';
+  chk.textContent=checked_?chkChar:'';
+  item.appendChild(chk);item.appendChild(document.createTextNode(text));
   return item;
 }
-function mkSep(){let s=document.createElement('div');s.className='dd-sep';return s;}
 
-function selectPosition(pos){
-  selectedPos=pos;
-  if(acTimer){clearInterval(acTimer);acTimer=null;}
-  aircraft=[];
-  if(!pos){
-    titleText.textContent='Ground';
-    mapData=null;colours=null;layerVisible={};rotation=0;magVar=0;
-    buildPositionMenu();buildMapsMenu();render();
-    return;
-  }
-  titleText.textContent='Ground: '+pos.Name;
-  panX=0;panY=0;
-  loadMap(pos.Airport);
-  buildPositionMenu();
-}
-
-// --- Maps menu ---
+/* ============================================================
+   Maps menu
+   Shows ALL Ground-category maps from the profile, grouped by folder.
+   Checked state from position's MapRefs.
+   Submenus expand on click/tap and stay open.
+   Map item toggle stays open (MapsDropDown_Closing cancels close).
+   ============================================================ */
 function buildMapsMenu(){
   ddMaps.innerHTML='';
-  if(!mapData) return;
+  if(!allGroundMaps||allGroundMaps.length===0) return;
+
   let folders={};
-  for(let layer of mapData.Layers){
-    let f=layer.Folder||'';
+  for(let m of allGroundMaps){
+    let f=m.Folder||'';
     if(!folders[f]) folders[f]=[];
-    folders[f].push(layer);
+    folders[f].push(m);
   }
   let folderNames=Object.keys(folders).sort();
   for(let fn of folderNames){
+    let maps=folders[fn];
+    maps.sort((a,b)=>a.Name.localeCompare(b.Name));
     if(fn===''){
-      for(let layer of folders[fn]) ddMaps.appendChild(makeMapItem(layer));
-    } else {
-      let sub=document.createElement('div');
-      sub.className='dd-sub';
-      let trigger=document.createElement('div');
-      trigger.className='dd-item';
-      trigger.textContent=fn;
+      for(let m of maps) ddMaps.appendChild(makeMapItem(m));
+    }else{
+      let sub=document.createElement('div');sub.className='dd-sub';
+      let trigger=document.createElement('div');trigger.className='dd-item';
+      trigger.appendChild(document.createTextNode(fn));
       sub.appendChild(trigger);
-      trigger.addEventListener('click',e=>{e.stopPropagation();sub.classList.toggle('touch-open');});
-      let subMenu=document.createElement('div');
-      subMenu.className='sub-menu';
-      for(let layer of folders[fn]) subMenu.appendChild(makeMapItem(layer));
+      // Toggle folder submenu on click/tap
+      trigger.addEventListener('click',e=>{
+        e.stopPropagation();
+        let isOpen=sub.classList.contains('open');
+        // Close sibling submenus
+        sub.parentElement.querySelectorAll(':scope > .dd-sub.open').forEach(s=>{if(s!==sub)s.classList.remove('open');});
+        sub.classList.toggle('open',!isOpen);
+      });
+      let subMenu=document.createElement('div');subMenu.className='sub-menu';
+      for(let m of maps) subMenu.appendChild(makeMapItem(m));
       sub.appendChild(subMenu);
       ddMaps.appendChild(sub);
     }
   }
 }
-function makeMapItem(layer){
-  let key=layer.Folder+'|'+layer.Name;
-  if(!(key in layerVisible)) layerVisible[key]=true;
-  let item=document.createElement('div');
-  item.className='dd-item';
-  let chk=document.createElement('span');
-  chk.className='chk';
-  chk.textContent=layerVisible[key]?'\u2713':'';
-  item.appendChild(chk);
-  item.appendChild(document.createTextNode(layer.Name));
+
+function makeMapItem(meta){
+  let key=layerKey(meta.Folder,meta.Name);
+  let ls=layerState[key];
+  let visible=ls?ls.visible:false;
+  let item=document.createElement('div');item.className='dd-item';
+  let chk=document.createElement('span');chk.className='chk';
+  chk.textContent=visible?'\u2713':'';
+  item.appendChild(chk);item.appendChild(document.createTextNode(meta.Name));
   item.addEventListener('click',e=>{
-    e.stopPropagation();
-    layerVisible[key]=!layerVisible[key];
-    chk.textContent=layerVisible[key]?'\u2713':'';
-    scheduleRender();
+    e.stopPropagation(); // Keep menu open (MapsDropDown_Closing behavior)
+    toggleMapLayer(key,meta,chk);
   });
   return item;
 }
 
-// --- API ---
+/* ============================================================
+   On-demand map layer loading
+   ============================================================ */
+function toggleMapLayer(key,meta,chkEl){
+  if(!layerState[key]) layerState[key]={visible:false,layer:null};
+  let ls=layerState[key];
+  ls.visible=!ls.visible;
+  chkEl.textContent=ls.visible?'\u2713':'';
+  if(ls.visible&&!ls.layer){
+    loadLayerGeometry(key).then(()=>scheduleRender());
+  }else{
+    scheduleRender();
+  }
+}
+
+function loadLayerGeometry(key){
+  return fetch('/api/maplayers?maps='+encodeURIComponent(key))
+    .then(r=>r.json())
+    .then(layers=>{
+      if(layers&&layers.length>0){
+        let lk=layerKey(layers[0].Folder,layers[0].Name);
+        if(layerState[lk]) layerState[lk].layer=layers[0];
+      }
+    }).catch(()=>{});
+}
+
+function loadMultipleLayers(keys){
+  if(keys.length===0) return Promise.resolve();
+  return fetch('/api/maplayers?maps='+encodeURIComponent(keys.join(',')))
+    .then(r=>r.json())
+    .then(layers=>{
+      if(!layers) return;
+      for(let layer of layers){
+        let key=layerKey(layer.Folder,layer.Name);
+        if(layerState[key]) layerState[key].layer=layer;
+      }
+    }).catch(()=>{});
+}
+
+/* ============================================================
+   Position selection
+   ============================================================ */
+function selectPosition(pos){
+  selectedPos=pos;
+  if(acTimer){clearInterval(acTimer);acTimer=null;}
+  aircraft=[];
+
+  if(!pos){
+    document.title='Ground';
+    for(let k in layerState) layerState[k].visible=false;
+    centerLat=0;centerLon=0;rotation=0;magVar=0;nmRange=2;panX=0;panY=0;
+    buildPositionMenu();buildMapsMenu();render();
+    return;
+  }
+
+  document.title='Ground: '+pos.Name;
+  centerLat=pos.CenterLat;
+  centerLon=pos.CenterLon;
+  nmRange=pos.DefaultRange||2;
+  rotation=pos.Rotation||0;
+  magVar=pos.MagneticVariation||0;
+  panX=0;panY=0;
+
+  // Uncheck all, then check position's MapRefs
+  for(let k in layerState) layerState[k].visible=false;
+  let checkedKeys=[];
+  if(pos.MapRefs){
+    for(let ref of pos.MapRefs){
+      let key=ref;
+      if(!layerState[key]) layerState[key]={visible:false,layer:null};
+      layerState[key].visible=true;
+      if(!layerState[key].layer) checkedKeys.push(key);
+    }
+  }
+
+  buildPositionMenu();
+  buildMapsMenu();
+
+  if(checkedKeys.length>0){
+    loadMultipleLayers(checkedKeys).then(()=>{
+      scheduleRender();
+      startAircraftPolling(pos.Airport);
+    });
+  }else{
+    scheduleRender();
+    startAircraftPolling(pos.Airport);
+  }
+}
+
+/* ============================================================
+   API
+   ============================================================ */
 function api(path){return fetch(path).then(r=>r.json());}
 
 function loadPositions(){
@@ -454,41 +651,16 @@ function loadPositions(){
   }).catch(()=>{});
 }
 
-function loadMap(icao){
-  api('/api/map?icao='+encodeURIComponent(icao)).then(data=>{
-    if(!data||!data.Map){mapData=null;colours=null;buildMapsMenu();render();return;}
-    mapData=data.Map;
+function loadGroundMaps(){
+  api('/api/groundmaps').then(data=>{
+    allGroundMaps=data.Maps||[];
     colours=data.Colours||null;
-    centerLat=mapData.CenterLat;
-    centerLon=mapData.CenterLon;
-    nmRange=mapData.DefaultRange||2;
-    rotation=mapData.Rotation||0;
-    magVar=mapData.MagneticVariation||0;
-    // Set layer visibility based on position's MapRefs
-    layerVisible={};
-    if(selectedPos&&selectedPos.MapRefs&&selectedPos.MapRefs.length>0){
-      let refNames=new Set();
-      selectedPos.MapRefs.forEach(r=>{
-        // Extract the layer name from ref like 'Sydney/ASMGCS_YSSY_RWY' -> 'ASMGCS_YSSY_RWY'
-        let slash=r.lastIndexOf('/');
-        refNames.add(slash>=0?r.substring(slash+1):r);
-      });
-      for(let layer of mapData.Layers){
-        let key=layer.Folder+'|'+layer.Name;
-        layerVisible[key]=refNames.has(layer.Name);
-      }
-      // If nothing matched, show all
-      if(!Object.values(layerVisible).some(v=>v)){
-        for(let k in layerVisible) layerVisible[k]=true;
-      }
-    } else {
-      for(let layer of mapData.Layers){
-        layerVisible[layer.Folder+'|'+layer.Name]=true;
-      }
+    applyTheme();
+    for(let m of allGroundMaps){
+      let key=layerKey(m.Folder,m.Name);
+      if(!layerState[key]) layerState[key]={visible:false,layer:null};
     }
     buildMapsMenu();
-    render();
-    startAircraftPolling(icao);
   }).catch(()=>{});
 }
 
@@ -496,17 +668,17 @@ function startAircraftPolling(icao){
   if(acTimer){clearInterval(acTimer);acTimer=null;}
   function poll(){
     api('/api/aircraft?icao='+encodeURIComponent(icao)).then(data=>{
-      aircraft=data||[];
-      scheduleRender();
+      aircraft=data||[];scheduleRender();
     }).catch(()=>{});
   }
   poll();
   acTimer=setInterval(poll,2000);
 }
 
-// --- Init ---
+/* Init */
 resize();
 loadPositions();
+loadGroundMaps();
 </script>
 </body>
 </html>";

@@ -51,6 +51,14 @@ public static class GroundMapData
         public List<MapLabel> Labels { get; set; } = new();
     }
 
+    /// <summary>Lightweight map metadata for dropdown menu (no geometry).</summary>
+    public sealed class GroundMapMeta
+    {
+        public string Folder { get; set; } = "";
+        public string Name { get; set; } = "";
+        public string Type { get; set; } = "";
+    }
+
     public sealed class InfillPolygon
     {
         public string Name { get; set; } = "";
@@ -82,6 +90,11 @@ public static class GroundMapData
         public int[] Departure { get; set; } = { 139, 220, 243 };
         public int[] Unknown { get; set; } = { 255, 156, 55 };
         public int[] Local { get; set; } = { 255, 100, 255 };
+        public int[] WindowBackground { get; set; } = { 160, 170, 170 };
+        public int[] DepressedButton { get; set; } = { 130, 146, 146 };
+        public int[] SelectedButton { get; set; } = { 0, 0, 96 };
+        public int[] InteractiveText { get; set; } = { 0, 0, 96 };
+        public int[] GenericText { get; set; } = { 96, 0, 0 };
     }
 
     // ---- Position discovery ----
@@ -271,10 +284,123 @@ public static class GroundMapData
             LoadMapFile(gf, map.Layers, gFolder);
         }
 
-        // Sort by priority
-        map.Layers.Sort((a, b) => a.Priority.CompareTo(b.Priority));
+        // Sort by priority descending (matches vatSys: higher priority drawn first = behind)
+        map.Layers.Sort((a, b) => b.Priority.CompareTo(a.Priority));
 
         return map.Layers.Count > 0 ? map : null;
+    }
+
+    /// <summary>
+    /// Scans ALL XML files under Maps/ and returns metadata for every Ground-category map.
+    /// Matches vatSys DisplayMaps.LoadMaps() which scans all XMLs in Maps/ recursively.
+    /// </summary>
+    public static List<GroundMapMeta> ScanAllGroundMaps(string profileDir)
+    {
+        var result = new List<GroundMapMeta>();
+        var mapsDir = Path.Combine(profileDir, "Maps");
+        if (!Directory.Exists(mapsDir)) return result;
+
+        try
+        {
+            var files = Directory.GetFiles(mapsDir, "*.xml", SearchOption.AllDirectories);
+            foreach (var file in files)
+            {
+                try
+                {
+                    // Derive folder from directory name (matches vatSys)
+                    // If file is directly in Maps/, folder = ""
+                    var dirName = Path.GetFileName(Path.GetDirectoryName(file)) ?? "";
+                    var folder = string.Equals(dirName, "Maps", StringComparison.OrdinalIgnoreCase) ? "" : dirName;
+
+                    var doc = XDocument.Load(file);
+                    var root = doc.Root;
+                    if (root is null) continue;
+
+                    foreach (var mapElem in root.Elements("Map"))
+                    {
+                        var type = mapElem.Attribute("Type")?.Value ?? "";
+                        // Ground-category: Type starts with "Ground_" (matches vatSys MapTypes >= Ground_RWY)
+                        if (!type.StartsWith("Ground_", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        var name = mapElem.Attribute("Name")?.Value ?? "";
+                        if (string.IsNullOrWhiteSpace(name)) continue;
+
+                        result.Add(new GroundMapMeta { Folder = folder, Name = name, Type = type });
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        // Sort by folder then name (matches vatSys menu order)
+        result.Sort((a, b) =>
+        {
+            var fc = string.Compare(a.Folder, b.Folder, StringComparison.OrdinalIgnoreCase);
+            return fc != 0 ? fc : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+        });
+        return result;
+    }
+
+    /// <summary>
+    /// Loads geometry for specific maps identified by folder+name pairs.
+    /// Scans all XML files to find the matching Map elements.
+    /// </summary>
+    public static List<MapLayer> LoadSpecificLayers(string profileDir, List<string> mapKeys)
+    {
+        var result = new List<MapLayer>();
+        if (mapKeys.Count == 0) return result;
+
+        var mapsDir = Path.Combine(profileDir, "Maps");
+        if (!Directory.Exists(mapsDir)) return result;
+
+        // Build a set of (folder, name) pairs we need
+        var needed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in mapKeys)
+            needed.Add(key); // key format: "Folder/Name" or just "Name"
+
+        try
+        {
+            var files = Directory.GetFiles(mapsDir, "*.xml", SearchOption.AllDirectories);
+            foreach (var file in files)
+            {
+                if (needed.Count == 0) break;
+                try
+                {
+                    var dirName = Path.GetFileName(Path.GetDirectoryName(file)) ?? "";
+                    var folder = string.Equals(dirName, "Maps", StringComparison.OrdinalIgnoreCase) ? "" : dirName;
+
+                    var doc = XDocument.Load(file);
+                    var root = doc.Root;
+                    if (root is null) continue;
+
+                    foreach (var mapElem in root.Elements("Map"))
+                    {
+                        var type = mapElem.Attribute("Type")?.Value ?? "";
+                        if (!type.StartsWith("Ground_", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        var name = mapElem.Attribute("Name")?.Value ?? "";
+                        var key = string.IsNullOrEmpty(folder) ? name : folder + "/" + name;
+                        if (!needed.Contains(key)) continue;
+
+                        needed.Remove(key);
+                        var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 99;
+                        var layer = new MapLayer { Type = type, Name = name, Folder = folder, Priority = priority };
+
+                        ParseMapGeometry(mapElem, layer);
+
+                        if (layer.Infills.Count > 0 || layer.Lines.Count > 0 || layer.Labels.Count > 0)
+                            result.Add(layer);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        // Sort by priority descending (matches vatSys rendering order)
+        result.Sort((a, b) => b.Priority.CompareTo(a.Priority));
+        return result;
     }
 
     private static void LoadMapFile(string filePath, List<MapLayer> layers, string folder = "")
@@ -289,69 +415,73 @@ public static class GroundMapData
             {
                 var type = mapElem.Attribute("Type")?.Value ?? "";
                 var name = mapElem.Attribute("Name")?.Value ?? "";
-                var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 0;
+                var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 99;
 
                 var layer = new MapLayer { Type = type, Name = name, Folder = folder, Priority = priority };
-
-                // Infills (filled polygons)
-                foreach (var infillElem in mapElem.Elements("Infill"))
-                {
-                    var infillName = infillElem.Attribute("Name")?.Value ?? "";
-                    var pointElem = infillElem.Element("Point");
-                    if (pointElem is null) continue;
-
-                    var polygon = ParsePolygonPoints(infillName, pointElem.Value);
-                    if (polygon.Points.Count >= 3)
-                        layer.Infills.Add(polygon);
-                }
-
-                // Lines
-                foreach (var lineElem in mapElem.Elements("Line"))
-                {
-                    var lineName = lineElem.Attribute("Name")?.Value ?? "";
-                    var pointElem = lineElem.Element("Point");
-                    if (pointElem is not null)
-                    {
-                        var line = ParseLinePoints(lineName, pointElem.Value);
-                        if (line.Points.Count >= 2)
-                            layer.Lines.Add(line);
-                    }
-                    else
-                    {
-                        // Points as direct child elements forming a polyline
-                        var multiLine = new MapLine { Name = lineName };
-                        foreach (var ptElem in lineElem.Elements("Point"))
-                        {
-                            var (ptLat, ptLon) = ParseCoordinate(ptElem.Value.Trim());
-                            if (ptLat != 0 || ptLon != 0)
-                                multiLine.Points.Add(new[] { Math.Round(ptLat, 8), Math.Round(ptLon, 8) });
-                        }
-                        if (multiLine.Points.Count >= 2)
-                            layer.Lines.Add(multiLine);
-                    }
-                }
-
-                // Labels
-                foreach (var labelElem in mapElem.Elements("Label"))
-                {
-                    foreach (var ptElem in labelElem.Elements("Point"))
-                    {
-                        var text = ptElem.Attribute("Name")?.Value ?? "";
-                        if (string.IsNullOrWhiteSpace(text)) continue;
-
-                        var (lat, lon) = ParseCoordinate(ptElem.Value.Trim());
-                        if (lat != 0 || lon != 0)
-                        {
-                            layer.Labels.Add(new MapLabel { Text = text, Lat = lat, Lon = lon });
-                        }
-                    }
-                }
+                ParseMapGeometry(mapElem, layer);
 
                 if (layer.Infills.Count > 0 || layer.Lines.Count > 0 || layer.Labels.Count > 0)
                     layers.Add(layer);
             }
         }
         catch { }
+    }
+
+    private static void ParseMapGeometry(XElement mapElem, MapLayer layer)
+    {
+        // Infills (filled polygons)
+        foreach (var infillElem in mapElem.Elements("Infill"))
+        {
+            var infillName = infillElem.Attribute("Name")?.Value ?? "";
+            var pointElem = infillElem.Element("Point");
+            if (pointElem is null) continue;
+
+            var polygon = ParsePolygonPoints(infillName, pointElem.Value);
+            if (polygon.Points.Count >= 3)
+                layer.Infills.Add(polygon);
+        }
+
+        // Lines
+        foreach (var lineElem in mapElem.Elements("Line"))
+        {
+            var lineName = lineElem.Attribute("Name")?.Value ?? "";
+            var pointElem = lineElem.Element("Point");
+            if (pointElem is not null)
+            {
+                var line = ParseLinePoints(lineName, pointElem.Value);
+                if (line.Points.Count >= 2)
+                    layer.Lines.Add(line);
+            }
+            else
+            {
+                // Points as direct child elements forming a polyline
+                var multiLine = new MapLine { Name = lineName };
+                foreach (var ptElem in lineElem.Elements("Point"))
+                {
+                    var (ptLat, ptLon) = ParseCoordinate(ptElem.Value.Trim());
+                    if (ptLat != 0 || ptLon != 0)
+                        multiLine.Points.Add(new[] { Math.Round(ptLat, 8), Math.Round(ptLon, 8) });
+                }
+                if (multiLine.Points.Count >= 2)
+                    layer.Lines.Add(multiLine);
+            }
+        }
+
+        // Labels
+        foreach (var labelElem in mapElem.Elements("Label"))
+        {
+            foreach (var ptElem in labelElem.Elements("Point"))
+            {
+                var text = ptElem.Attribute("Name")?.Value ?? "";
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                var (lat, lon) = ParseCoordinate(ptElem.Value.Trim());
+                if (lat != 0 || lon != 0)
+                {
+                    layer.Labels.Add(new MapLabel { Text = text, Lat = lat, Lon = lon });
+                }
+            }
+        }
     }
 
     // ---- Colours ----
@@ -386,6 +516,11 @@ public static class GroundMapData
                     case "GroundDeparture": colours.Departure = rgb; break;
                     case "GroundUnknown": colours.Unknown = rgb; break;
                     case "GroundLocal": colours.Local = rgb; break;
+                    case "WindowBackground": colours.WindowBackground = rgb; break;
+                    case "DepressedWindowButton": colours.DepressedButton = rgb; break;
+                    case "SelectedWindowButton": colours.SelectedButton = rgb; break;
+                    case "InteractiveText": colours.InteractiveText = rgb; break;
+                    case "GenericText": colours.GenericText = rgb; break;
                 }
             }
         }

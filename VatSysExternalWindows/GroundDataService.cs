@@ -18,6 +18,11 @@ public sealed class GroundDataService
     private List<GroundMapData.GroundPosition>? _positions;
     private readonly Dictionary<string, GroundMapData.AirportMap> _mapCache = new(StringComparer.OrdinalIgnoreCase);
     private GroundMapData.ColourSet? _colours;
+    private List<GroundMapData.GroundMapMeta>? _groundMaps;
+
+    // Position history: callsign -> ring buffer of [lat,lon,hdg]
+    private readonly Dictionary<string, List<double[]>> _history = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxHistoryDots = 10;
 
     /// <summary>Returns all ASMGCS positions from the profile.</summary>
     public List<GroundMapData.GroundPosition> GetPositions()
@@ -62,6 +67,21 @@ public sealed class GroundDataService
         EnsureProfileDir();
         _colours ??= GroundMapData.LoadColours(_profileDir);
         return _colours;
+    }
+
+    /// <summary>Returns metadata for ALL Ground-category maps across the profile (for dropdown).</summary>
+    public List<GroundMapData.GroundMapMeta> GetGroundMaps()
+    {
+        EnsureProfileDir();
+        _groundMaps ??= GroundMapData.ScanAllGroundMaps(_profileDir);
+        return _groundMaps;
+    }
+
+    /// <summary>Loads geometry for specific map layers identified by "Folder/Name" keys.</summary>
+    public List<GroundMapData.MapLayer> GetMapLayers(List<string> mapKeys)
+    {
+        EnsureProfileDir();
+        return GroundMapData.LoadSpecificLayers(_profileDir, mapKeys);
     }
 
     /// <summary>Returns aircraft near the given airport.</summary>
@@ -140,6 +160,9 @@ public sealed class GroundDataService
                 }
                 catch { }
 
+                // Record position for trail dots
+                RecordPosition(callsign, lat, lon, heading);
+
                 result.Add(new AircraftDto
                 {
                     Callsign = callsign,
@@ -152,12 +175,58 @@ public sealed class GroundDataService
                     WakeCat = wakeCat,
                     AircraftType = aircraftType,
                     Runway = runway,
+                    History = GetHistory(callsign),
                 });
             }
             catch { }
         }
 
         return result;
+    }
+
+    /// <summary>Records current position and returns history (excluding current).</summary>
+    private double[][]? GetHistory(string callsign)
+    {
+        if (string.IsNullOrEmpty(callsign)) return null;
+
+        lock (_history)
+        {
+            if (!_history.TryGetValue(callsign, out var list))
+                return null;
+
+            if (list.Count == 0) return null;
+            var arr = new double[list.Count][];
+            for (int i = 0; i < list.Count; i++)
+                arr[i] = list[i];
+            return arr;
+        }
+    }
+
+    /// <summary>Records a position for trail dot history.</summary>
+    public void RecordPosition(string callsign, double lat, double lon, double hdg)
+    {
+        if (string.IsNullOrEmpty(callsign)) return;
+
+        lock (_history)
+        {
+            if (!_history.TryGetValue(callsign, out var list))
+            {
+                list = new List<double[]>();
+                _history[callsign] = list;
+            }
+
+            // Don't add if position hasn't changed
+            if (list.Count > 0)
+            {
+                var last = list[list.Count - 1];
+                if (Math.Abs(last[0] - lat) < 0.00001 && Math.Abs(last[1] - lon) < 0.00001)
+                    return;
+            }
+
+            list.Add(new[] { Math.Round(lat, 7), Math.Round(lon, 7) });
+            while (list.Count > MaxHistoryDots)
+                list.RemoveAt(0);
+        }
     }
 
     private void EnsureProfileDir()
@@ -183,6 +252,7 @@ public sealed class GroundDataService
         _positions = null;
         _mapCache.Clear();
         _colours = null;
+        _groundMaps = null;
 
         try
         {
@@ -202,7 +272,7 @@ public sealed class GroundDataService
                         if (Directory.Exists(dir))
                         {
                             _profileDir = dir;
-                            _profileName = name;
+                            _profileName = name ?? "";
                             return;
                         }
                     }
@@ -243,4 +313,5 @@ public sealed class AircraftDto
     public string WakeCat { get; set; } = "";
     public string AircraftType { get; set; } = "";
     public string Runway { get; set; } = "";
+    public double[][]? History { get; set; }
 }

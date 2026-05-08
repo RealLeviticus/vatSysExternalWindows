@@ -13,9 +13,9 @@
     <ProgramFilesX86 Condition="'$(ProgramFilesX86)' == ''">C:\Program Files (x86)</ProgramFilesX86>
     <VatSysDir Condition="'$(VatSysDir)' == ''">$(ProgramFilesX86)\vatSys</VatSysDir>
     <VatSysExe Condition="'$(VatSysExe)' == ''">$(VatSysDir)\bin\vatSys.exe</VatSysExe>
-    <VatSysProfilePluginsDir Condition="'$(VatSysProfilePluginsDir)' == ''">$(UserProfile)\Documents\vatSys Files\Profiles\Australia\Plugins\VatSysExternalWindows\</VatSysProfilePluginsDir>
+    <VatSysProfilePluginsDir Condition="'$(VatSysProfilePluginsDir)' == ''">$(UserProfile)\OneDrive\Documents 1\vatSys Files\Profiles\Australia\Plugins\VatSysExternalWindows\</VatSysProfilePluginsDir>
     <OutputPath>$(VatSysProfilePluginsDir)</OutputPath>
-    <BaseOutputPath>C:\Users\levis\Documents\vatSys Files\Profiles\Australia\Plugins\VatSysExternalWindows</BaseOutputPath>
+    <BaseOutputPath>C:\Users\levis\OneDrive\Documents 1\vatSys Files\Profiles\Australia\Plugins\VatSysExternalWindows</BaseOutputPath>
   </PropertyGroup>
 
   <ItemGroup>

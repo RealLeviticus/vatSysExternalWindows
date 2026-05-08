@@ -130,12 +130,40 @@ public sealed class EmbeddedWebServer : IDisposable
         if (req.Path == "/api/airports")
         {
             var positions = _data.GetPositions();
-            var list = positions.Select(p => new { p.Name, p.Airport, p.Group, p.MapRefs }).ToList();
+            var list = positions.Select(p => new {
+                p.Name, p.Airport, p.Group, p.MapRefs,
+                p.CenterLat, p.CenterLon, p.DefaultRange, p.Rotation, p.MagneticVariation
+            }).ToList();
             WriteJson(s, 200, list);
             return;
         }
 
-        // Get map geometry + colours for an airport
+        // All Ground map metadata + colours (for dropdown menu)
+        if (req.Path == "/api/groundmaps")
+        {
+            WriteJson(s, 200, new { Maps = _data.GetGroundMaps(), Colours = _data.GetColours() });
+            return;
+        }
+
+        // Load geometry for specific map layers (on-demand)
+        if (req.Path == "/api/maplayers")
+        {
+            if (!req.Query.TryGetValue("maps", out var mapsParam) || string.IsNullOrWhiteSpace(mapsParam))
+            {
+                WriteJson(s, 400, new { Error = "maps parameter required (comma-separated Folder/Name keys)." });
+                return;
+            }
+
+            var mapKeys = mapsParam.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(k => k.Trim())
+                .Where(k => k.Length > 0)
+                .ToList();
+
+            WriteJson(s, 200, _data.GetMapLayers(mapKeys));
+            return;
+        }
+
+        // Get map geometry + colours for an airport (legacy, still useful)
         if (req.Path == "/api/map")
         {
             if (!req.Query.TryGetValue("icao", out var icao) || string.IsNullOrWhiteSpace(icao))
