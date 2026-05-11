@@ -11,7 +11,7 @@ public static class WebUiPage
 <meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>
 <title>Ground</title>
 <style>
-@font-face{font-family:'Terminus';src:local('Terminus (TTF)'),local('Terminus'),local('Terminus (TTF) for Windows'),local('TerminusTTF'),local('TerminusTTFWindows');font-weight:bold;}
+@font-face{font-family:'Terminus';src:url('/font.ttf') format('truetype'),local('Terminus (TTF)'),local('Terminus'),local('Terminus (TTF) for Windows'),local('TerminusTTF'),local('TerminusTTFWindows');font-weight:bold;}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}
 html,body{width:100%;height:100%;overflow:hidden;background:rgb(105,105,105);font-family:'Terminus','Consolas','Courier New',monospace;color:rgb(0,0,96);}
 body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);display:flex;flex-direction:column;}
@@ -36,11 +36,9 @@ body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bot
 .dd-item .chk{width:22px;text-align:center;flex-shrink:0;font-size:14px;}
 .dd-sep{height:1px;background:rgb(120,128,128);margin:1px 2px;}
 
-/* Folder submenus - inline accordion style (touch-friendly) */
-.dd-sub>.sub-menu{display:none;padding-left:16px;}
-.dd-sub.open>.sub-menu{display:block;}
-.dd-sub>.dd-item::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;display:inline-block;transition:transform 0.15s;}
-.dd-sub.open>.dd-item::after{transform:rotate(90deg);}
+.dd-back{font-weight:bold;border-bottom:1px solid rgb(120,128,128);}
+.dd-group>.dd-item::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;display:inline-block;}
+.dd-group::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;display:inline-block;}
 
 canvas{flex:1;display:block;touch-action:none;}
 </style>
@@ -63,6 +61,7 @@ canvas{flex:1;display:block;touch-action:none;}
       <div class='dd-item disabled'>Decouple</div>
     </div>
   </div>
+  <a href='/' class='menu-btn' id='btn-back' style='margin-left:auto;text-decoration:none;display:flex;align-items:center;'>◀ Back</a>
 </div>
 <canvas id='cv'></canvas>
 <script>
@@ -157,8 +156,13 @@ function applyTheme(){
     '.dd-item.disabled{color:'+disabledCol+';}';
 }
 
-function typeColour(type){
+function typeColour(type,customColour){
   if(!colours) return'#888';
+  if(customColour){
+    let cc=customColour.toLowerCase();
+    if(cc==='release'&&colours.Release) return rgb(colours.Release);
+    if(cc==='crossing'&&colours.Crossing) return rgb(colours.Crossing);
+  }
   let t=(type||'').toLowerCase();
   if(t.includes('rwy')) return rgb(colours.Runway);
   if(t.includes('twy')) return rgb(colours.Taxiway);
@@ -187,6 +191,7 @@ function scheduleRender(){if(!renderPending){renderPending=true;requestAnimation
 
 function render(){
   ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.imageSmoothingEnabled=false;
   ctx.fillStyle=colours?rgb(colours.Background):'rgb(105,105,105)';
   ctx.fillRect(0,0,W,H);
 
@@ -200,7 +205,7 @@ function render(){
 
   for(let ls of visibleLayers){
     let layer=ls.layer;
-    let col=typeColour(layer.Type);
+    let col=typeColour(layer.Type,layer.CustomColour);
 
     // Infills
     ctx.fillStyle=col;
@@ -236,18 +241,39 @@ function render(){
 
 /* ============================================================
    Aircraft rendering - matches vatSys PaintGroundTracks exactly
-   Ground symbols: FigureBegin=Filled diamond, wake-category sized.
-   Ground default StrokeWidth=1 → filled + 1px outline.
-   GroundLight/Medium/Heavy/Super StrokeWidth=0 → filled only.
-   Airborne (OnGround=false): ModeS circle (6.5px radius, filled).
-   NO velocity vector for ground tracks (vatSys doesn't render them).
-   Leader line: Direction=1 (22.5° NE), Length=1 (40px).
+   Ground symbol StrokeWidth=1 (unknown wake) → outline only.
+   GroundLight/Medium/Heavy/Super StrokeWidth=0 → filled.
+   Unknown/orange ground tracks: no leader line or label.
+   Airborne (OnGround=false): ModeS circle (6.5px radius, stroked).
+   NO velocity vector for ground tracks.
+   Leader line: per-track direction (0-15) and length (0-2).
    Label font: eurofont_sml = 18px Terminus bold.
    History dots: 2px radius filled circles at past positions.
+   Label dragging: tap symbol to start moving, tap to place.
+   White circle indicator on selected track during label move.
    ============================================================ */
-const LABEL_DIR=1,LABEL_LEN=1;
-const LABEL_ANGLE=LABEL_DIR*22.5;
-const LEADER_PX=LABEL_LEN*35+5;
+const LABEL_DIR_DEFAULT=1,LABEL_LEN_DEFAULT=1;
+
+// Per-track label state: callsign -> {dir, len}
+let labelState={};
+let labelMovingCS=null; // callsign of track being moved
+
+function getLabelDir(cs){return labelState[cs]?labelState[cs].dir:LABEL_DIR_DEFAULT;}
+function getLabelLen(cs){return labelState[cs]?labelState[cs].len:LABEL_LEN_DEFAULT;}
+
+// vatSys GetLabelOrientation — calculates direction (0-15) and length (0-2)
+// from track screen position to pointer position
+function getLabelOrientation(tx,ty,mx,my){
+  let dy=my-ty,dx=mx-tx;
+  let angle=Math.atan(dy/Math.abs(dx))*180/Math.PI;
+  if(dx<0) angle=360-angle+180;
+  if(angle>360) angle-=360;
+  if(angle<0) angle+=360;
+  let dist=Math.sqrt(dy*dy+dx*dx)-5;
+  let dir=Math.round(angle/360*16)%16;
+  let len=Math.min(2,Math.max(0,Math.round(dist/35)));
+  return[dir,len];
+}
 
 function drawAircraft(ac){
   let p=latLonToCanvas(ac.Lat,ac.Lon);
@@ -266,6 +292,7 @@ function drawAircraft(ac){
 
   if(ac.OnGround){
     // Ground symbol: wake-category diamond
+    // Ground (StrokeWidth=1): outline only. GroundLight/Medium/Heavy/Super (StrokeWidth=0): filled.
     let sym=wakeSymbol(ac.WakeCat);
     ctx.save();
     ctx.translate(p[0],p[1]);
@@ -275,8 +302,8 @@ function drawAircraft(ac){
     ctx.moveTo(pts[0][0],pts[0][1]);
     for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
     ctx.closePath();
-    ctx.fillStyle=col;ctx.fill();
     if(sym.sw>0){ctx.strokeStyle=col;ctx.lineWidth=sym.sw;ctx.stroke();}
+    else{ctx.fillStyle=col;ctx.fill();}
     ctx.restore();
   }else{
     // Airborne symbol: ModeS circle (6.5px radius)
@@ -284,9 +311,31 @@ function drawAircraft(ac){
     ctx.strokeStyle=col;ctx.lineWidth=1;ctx.stroke();
   }
 
+  // White circle selection indicator when label is being moved
+  let cs=ac.Callsign||'';
+  if(labelMovingCS===cs){
+    ctx.beginPath();ctx.arc(p[0],p[1],14,0,Math.PI*2);
+    ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+  }
+
+  // Unknown/orange tracks: no leader line or label in vatSys ground map
+  if(ac.Category!=='departure'&&ac.Category!=='arrival'&&ac.Category!=='local'&&ac.OnGround) return;
+
+  // Per-track label direction and length
+  let ldir=getLabelDir(cs);
+  let llen=getLabelLen(cs);
+
+  // If this track is being moved, use live preview position
+  if(labelMovingCS===cs&&labelMovePreview){
+    ldir=labelMovePreview[0];llen=labelMovePreview[1];
+  }
+
+  let lAngle=ldir*22.5;
+  let leaderPx=llen*35+5;
+  let rad=lAngle*Math.PI/180;
+  let lx=p[0]+leaderPx*Math.cos(rad),ly=p[1]+leaderPx*Math.sin(rad);
+
   // Leader line
-  let rad=LABEL_ANGLE*Math.PI/180;
-  let lx=p[0]+LEADER_PX*Math.cos(rad),ly=p[1]+LEADER_PX*Math.sin(rad);
   ctx.strokeStyle=col;ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(lx,ly);ctx.stroke();
 
@@ -294,36 +343,97 @@ function drawAircraft(ac){
   ctx.fillStyle=col;
   ctx.font=""bold 18px 'Terminus','Consolas',monospace"";
   let fontH=18;
-  let isWest=LABEL_DIR>4&&LABEL_DIR<12;
+  let isWest=ldir>4&&ldir<12;
   ctx.textAlign=isWest?'right':'left';
   ctx.textBaseline='top';
   let labelY=ly;
 
-  // Label lines per Labels.xml ground label types
+  // Label lines per Labels.xml exact definitions from Australia profile
   let lines=[];
   if(!ac.OnGround){
-    // GroundAir: RWY / ACID / ATYPE WakeCat / Level GS
+    // GroundAir: Line1=RWY / Line2=ACID / Line3=ATYPE WakeCat / Line4=LEVEL GS
     if(ac.Runway) lines.push(ac.Runway);
     if(ac.Callsign) lines.push(ac.Callsign);
     if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
-    let lvl='';if(ac.Gs>0)lvl=Math.round(ac.Gs)+'';if(lvl)lines.push(lvl);
+    // Line 4: LEVEL (alt/100 as 3-digit) + GROUNDSPEED (gs/10 as NN.)
+    let line4='';
+    if(ac.Alt!=null&&ac.Alt>=0){
+      line4=String(Math.round(ac.Alt/100)).padStart(3,'0');
+    }
+    if(ac.Gs>=0&&ac.Gs<=995){
+      line4+=(line4?' ':'')+String(Math.round(ac.Gs/10)).padStart(2,'0');
+    }else if(ac.Gs>995){
+      line4+=(line4?' ':'')+'++';
+    }
+    if(line4) lines.push(line4);
   }else if(ac.Category==='departure'){
-    // GroundDeparture: RWY / ACID / ATYPE WakeCat
+    // GroundDeparture: Line1=RWY / Line2=ACID / Line3=ATYPE WakeCat
     if(ac.Runway) lines.push(ac.Runway);
     if(ac.Callsign) lines.push(ac.Callsign);
     if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
   }else if(ac.Category==='arrival'){
-    // GroundArrival: Bay / ACID / ATYPE WakeCat
+    // GroundArrival: Line1=Bay / Line2=ACID / Line3=ATYPE WakeCat
     if(ac.Bay) lines.push(ac.Bay);
     if(ac.Callsign) lines.push(ac.Callsign);
     if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
-  }else{
-    // GroundLimited: callsign only
-    if(ac.Callsign) lines.push(ac.Callsign);
   }
 
+  if(lines.length===0) return;
   for(let i=0;i<lines.length;i++) ctx.fillText(lines[i],lx,labelY+i*fontH);
 }
+
+/* ============================================================
+   Label dragging — tap symbol to start moving, tap to place
+   Matches vatSys: right-click to start, move, right-click to place.
+   On touch: tap symbol to toggle move mode.
+   ============================================================ */
+let labelMovePreview=null;
+let tapStartPos=null; // track pointerdown position for tap detection
+
+function findAircraftAt(cx,cy){
+  for(let ac of aircraft){
+    let p=latLonToCanvas(ac.Lat,ac.Lon);
+    if(Math.abs(p[0]-cx)<12&&Math.abs(p[1]-cy)<12) return ac;
+  }
+  return null;
+}
+
+cv.addEventListener('contextmenu',e=>{e.preventDefault();});
+
+cv.addEventListener('pointerup',e=>{
+  if(pointers.size>1) return;
+  let rect=cv.getBoundingClientRect();
+  let ux=e.clientX-rect.left,uy=e.clientY-rect.top;
+
+  if(labelMovingCS){
+    // Place the label at current pointer position
+    let ac=aircraft.find(a=>(a.Callsign||'')===labelMovingCS);
+    if(ac){
+      let p=latLonToCanvas(ac.Lat,ac.Lon);
+      let ori=getLabelOrientation(p[0],p[1],ux,uy);
+      if(!labelState[labelMovingCS]) labelState[labelMovingCS]={dir:LABEL_DIR_DEFAULT,len:LABEL_LEN_DEFAULT};
+      labelState[labelMovingCS].dir=ori[0];
+      labelState[labelMovingCS].len=ori[1];
+    }
+    labelMovingCS=null;labelMovePreview=null;
+    scheduleRender();
+    return;
+  }
+
+  // Detect tap (not drag) — start label move if tapped on aircraft
+  if(tapStartPos){
+    let dx=Math.abs(e.clientX-tapStartPos.x),dy=Math.abs(e.clientY-tapStartPos.y);
+    if(dx<6&&dy<6){
+      let ac=findAircraftAt(ux,uy);
+      if(ac&&ac.Callsign){
+        labelMovingCS=ac.Callsign;
+        labelMovePreview=null;
+        scheduleRender();
+      }
+    }
+    tapStartPos=null;
+  }
+});
 
 /* ============================================================
    Resize
@@ -344,12 +454,22 @@ let pointers=new Map(),panLast=null,pinchLast=null;
 cv.addEventListener('pointerdown',e=>{
   cv.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  tapStartPos={x:e.clientX,y:e.clientY};
+  if(labelMovingCS){pinchLast=null;panLast=null;return;} // suppress pan during label move
   if(pointers.size===1){panLast={x:e.clientX,y:e.clientY};pinchLast=null;}
   else if(pointers.size===2){panLast=null;let pts=[...pointers.values()];pinchLast={dist:Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y),mx:(pts[0].x+pts[1].x)/2,my:(pts[0].y+pts[1].y)/2};}
 });
 cv.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  // Label move preview
+  if(labelMovingCS&&pointers.size===1){
+    let rect=cv.getBoundingClientRect();
+    let mx=e.clientX-rect.left,my=e.clientY-rect.top;
+    let ac=aircraft.find(a=>(a.Callsign||'')===labelMovingCS);
+    if(ac){let p=latLonToCanvas(ac.Lat,ac.Lon);labelMovePreview=getLabelOrientation(p[0],p[1],mx,my);scheduleRender();}
+    return;
+  }
   if(pointers.size===1&&panLast){
     let pt=[...pointers.values()][0];
     panX+=pt.x-panLast.x;panY+=pt.y-panLast.y;
@@ -388,7 +508,7 @@ cv.addEventListener('wheel',e=>{
   nmRange*=sf;nmRange=Math.max(0.1,Math.min(50,nmRange));
   scheduleRender();
 },{passive:false});
-cv.addEventListener('dblclick',e=>{e.preventDefault();panX=0;panY=0;if(selectedPos)nmRange=selectedPos.DefaultRange||2;scheduleRender();});
+cv.addEventListener('dblclick',e=>{e.preventDefault();panX=0;panY=0;if(selectedPos)nmRange=selectedPos.DefaultRange||2;labelMovingCS=null;labelMovePreview=null;scheduleRender();});
 
 /* ============================================================
    Menu system
@@ -405,12 +525,7 @@ let openDD=null;
 function closeAllDD(){
   document.querySelectorAll('.dropdown').forEach(d=>d.classList.remove('show'));
   document.querySelectorAll('.menu-btn').forEach(b=>b.classList.remove('active'));
-  closeAllSubs();
   openDD=null;
-}
-
-function closeAllSubs(){
-  document.querySelectorAll('.dd-sub.open').forEach(s=>s.classList.remove('open'));
 }
 
 function toggleDD(btn,dd){
@@ -435,10 +550,25 @@ document.addEventListener('click',e=>{
 });
 
 /* ============================================================
-   Position menu
+   Position menu (drill-down navigation)
    ============================================================ */
-function buildPositionMenu(){
+function buildPositionMenu(groupFilter){
   ddPos.innerHTML='';
+
+  if(groupFilter){
+    let back=document.createElement('div');back.className='dd-item dd-back';
+    let chkB=document.createElement('span');chkB.className='chk';chkB.textContent='\u25C0';
+    back.appendChild(chkB);back.appendChild(document.createTextNode('Back'));
+    back.addEventListener('click',e=>{e.stopPropagation();buildPositionMenu(null);});
+    ddPos.appendChild(back);
+
+    let groups={};
+    positions.forEach(p=>{if(p.Group&&p.Group.trim()){if(!groups[p.Group])groups[p.Group]=[];groups[p.Group].push(p);}});
+    let items=(groups[groupFilter]||[]).sort((a,b)=>a.Name.localeCompare(b.Name));
+    items.forEach(p=>ddPos.appendChild(mkPosItem(p)));
+    return;
+  }
+
   let freeItem=mkItem('\u2713',selectedPos===null,'Free');
   freeItem.addEventListener('click',()=>{selectPosition(null);closeAllDD();});
   ddPos.appendChild(freeItem);
@@ -450,24 +580,11 @@ function buildPositionMenu(){
   });
   let groupNames=Object.keys(groups).sort();
   for(let gn of groupNames){
-    let sub=document.createElement('div');sub.className='dd-sub';
-    let trigger=document.createElement('div');trigger.className='dd-item';
+    let trigger=document.createElement('div');trigger.className='dd-item dd-group';
     let chkSpan=document.createElement('span');chkSpan.className='chk';chkSpan.textContent='';
     trigger.appendChild(chkSpan);trigger.appendChild(document.createTextNode(gn));
-    sub.appendChild(trigger);
-    // Toggle submenu on click/tap
-    trigger.addEventListener('click',e=>{
-      e.stopPropagation();
-      let isOpen=sub.classList.contains('open');
-      // Close sibling submenus first
-      sub.parentElement.querySelectorAll(':scope > .dd-sub.open').forEach(s=>{if(s!==sub)s.classList.remove('open');});
-      sub.classList.toggle('open',!isOpen);
-    });
-    let subMenu=document.createElement('div');subMenu.className='sub-menu';
-    groups[gn].sort((a,b)=>a.Name.localeCompare(b.Name));
-    groups[gn].forEach(p=>subMenu.appendChild(mkPosItem(p)));
-    sub.appendChild(subMenu);
-    ddPos.appendChild(sub);
+    trigger.addEventListener('click',(function(name){return function(e){e.stopPropagation();buildPositionMenu(name);};})(gn));
+    ddPos.appendChild(trigger);
   }
   ungrouped.sort((a,b)=>a.Name.localeCompare(b.Name));
   ungrouped.forEach(p=>ddPos.appendChild(mkPosItem(p)));
@@ -492,13 +609,9 @@ function mkItem(chkChar,checked_,text){
 }
 
 /* ============================================================
-   Maps menu
-   Shows ALL Ground-category maps from the profile, grouped by folder.
-   Checked state from position's MapRefs.
-   Submenus expand on click/tap and stay open.
-   Map item toggle stays open (MapsDropDown_Closing cancels close).
+   Maps menu (drill-down navigation)
    ============================================================ */
-function buildMapsMenu(){
+function buildMapsMenu(folderFilter){
   ddMaps.innerHTML='';
   if(!allGroundMaps||allGroundMaps.length===0) return;
 
@@ -508,6 +621,19 @@ function buildMapsMenu(){
     if(!folders[f]) folders[f]=[];
     folders[f].push(m);
   }
+
+  if(folderFilter){
+    let back=document.createElement('div');back.className='dd-item dd-back';
+    let chkB=document.createElement('span');chkB.className='chk';chkB.textContent='\u25C0';
+    back.appendChild(chkB);back.appendChild(document.createTextNode('Back'));
+    back.addEventListener('click',e=>{e.stopPropagation();buildMapsMenu(null);});
+    ddMaps.appendChild(back);
+
+    let maps=(folders[folderFilter]||[]).sort((a,b)=>a.Name.localeCompare(b.Name));
+    for(let m of maps) ddMaps.appendChild(makeMapItem(m));
+    return;
+  }
+
   let folderNames=Object.keys(folders).sort();
   for(let fn of folderNames){
     let maps=folders[fn];
@@ -515,22 +641,10 @@ function buildMapsMenu(){
     if(fn===''){
       for(let m of maps) ddMaps.appendChild(makeMapItem(m));
     }else{
-      let sub=document.createElement('div');sub.className='dd-sub';
-      let trigger=document.createElement('div');trigger.className='dd-item';
+      let trigger=document.createElement('div');trigger.className='dd-item dd-group';
       trigger.appendChild(document.createTextNode(fn));
-      sub.appendChild(trigger);
-      // Toggle folder submenu on click/tap
-      trigger.addEventListener('click',e=>{
-        e.stopPropagation();
-        let isOpen=sub.classList.contains('open');
-        // Close sibling submenus
-        sub.parentElement.querySelectorAll(':scope > .dd-sub.open').forEach(s=>{if(s!==sub)s.classList.remove('open');});
-        sub.classList.toggle('open',!isOpen);
-      });
-      let subMenu=document.createElement('div');subMenu.className='sub-menu';
-      for(let m of maps) subMenu.appendChild(makeMapItem(m));
-      sub.appendChild(subMenu);
-      ddMaps.appendChild(sub);
+      trigger.addEventListener('click',(function(name){return function(e){e.stopPropagation();buildMapsMenu(name);};})(fn));
+      ddMaps.appendChild(trigger);
     }
   }
 }
@@ -670,9 +784,35 @@ function startAircraftPolling(icao){
     api('/api/aircraft?icao='+encodeURIComponent(icao)).then(data=>{
       aircraft=data||[];scheduleRender();
     }).catch(()=>{});
+    // Poll visible crossing/released maps from vatSys and sync state
+    api('/api/visiblemaps').then(keys=>{
+      if(!keys||!Array.isArray(keys)) return;
+      let changed=false;
+      let toLoad=[];
+      // Show maps that vatSys has visible
+      for(let key of keys){
+        if(!layerState[key]) layerState[key]={visible:true,layer:null};
+        if(!layerState[key].visible){layerState[key].visible=true;changed=true;}
+        if(!layerState[key].layer) toLoad.push(key);
+      }
+      // Hide crossing/released maps that vatSys no longer has visible
+      for(let key in layerState){
+        let ls=layerState[key];
+        if(!ls.layer) continue;
+        let cc=(ls.layer.CustomColour||'').toLowerCase();
+        if(cc!=='release'&&cc!=='crossing') continue;
+        let shouldShow=keys.indexOf(key)>=0;
+        if(ls.visible!==shouldShow){ls.visible=shouldShow;changed=true;}
+      }
+      if(toLoad.length>0){
+        loadMultipleLayers(toLoad).then(()=>{scheduleRender();buildMapsMenu();});
+      }else if(changed){
+        scheduleRender();buildMapsMenu();
+      }
+    }).catch(()=>{});
   }
   poll();
-  acTimer=setInterval(poll,2000);
+  acTimer=setInterval(poll,500);
 }
 
 /* Init */

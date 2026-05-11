@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -16,18 +17,21 @@ public sealed class EmbeddedWebServer : IDisposable
     private static readonly byte[] HeaderEnd = { 13, 10, 13, 10 };
 
     private readonly GroundDataService _data;
+    private readonly AsdDataService _asd;
     private readonly JavaScriptSerializer _json;
     private readonly CancellationTokenSource _cts;
     private readonly int _port;
+    private byte[]? _fontCache;
 
     private readonly object _lock = new object();
     private TcpListener? _listener;
     private Task? _loop;
     private bool _disposed;
 
-    public EmbeddedWebServer(GroundDataService data, int port)
+    public EmbeddedWebServer(GroundDataService data, AsdDataService asd, int port)
     {
         _data = data;
+        _asd = asd;
         _port = port;
         _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         _cts = new CancellationTokenSource();
@@ -122,8 +126,31 @@ public sealed class EmbeddedWebServer : IDisposable
 
         if (req.Path == "/" || req.Path == "/index.html")
         {
+            WriteResponse(s, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(LandingPage.Html));
+            return;
+        }
+
+        if (req.Path == "/ground" || req.Path == "/ground/")
+        {
             WriteResponse(s, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(WebUiPage.Html));
             return;
+        }
+
+        if (req.Path == "/asd" || req.Path == "/asd/")
+        {
+            WriteResponse(s, 200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(AsdUiPage.Html));
+            return;
+        }
+
+        // Serve Terminus Bold font for consistent rendering on all devices (iPad etc.)
+        if (req.Path == "/font.ttf")
+        {
+            var font = GetFontBytes();
+            if (font is not null)
+            {
+                WriteFontResponse(s, font);
+                return;
+            }
         }
 
         // List available positions (with name for menu display)
@@ -196,7 +223,106 @@ public sealed class EmbeddedWebServer : IDisposable
             return;
         }
 
+        // Get currently visible crossing/released maps from vatSys Ground window
+        if (req.Path == "/api/visiblemaps")
+        {
+            WriteJson(s, 200, _data.GetVisibleCrossingReleasedMaps());
+            return;
+        }
+
+        // ---- ASD API routes ----
+
+        if (req.Path == "/api/asd/positions")
+        {
+            var positions = _asd.GetPositions();
+            var list = positions.Select(p => new { p.Name, p.Group, p.CenterLat, p.CenterLon, p.DefaultRange, p.MapRefs }).ToList();
+            WriteJson(s, 200, list);
+            return;
+        }
+
+        if (req.Path == "/api/asd/maps")
+        {
+            WriteJson(s, 200, new { Maps = _asd.GetAsdMaps(), Colours = _asd.GetColours(), VelocityVectors = _asd.GetVelocityVectors() });
+            return;
+        }
+
+        if (req.Path == "/api/asd/maplayers")
+        {
+            if (!req.Query.TryGetValue("maps", out var mapsParam) || string.IsNullOrWhiteSpace(mapsParam))
+            {
+                WriteJson(s, 400, new { Error = "maps parameter required." });
+                return;
+            }
+            var mapKeys = mapsParam.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(k => k.Trim()).Where(k => k.Length > 0).ToList();
+            WriteJson(s, 200, _asd.GetMapLayers(mapKeys));
+            return;
+        }
+
+        if (req.Path == "/api/asd/aircraft")
+        {
+            if (!req.Query.TryGetValue("lat", out var latStr) ||
+                !req.Query.TryGetValue("lon", out var lonStr) ||
+                !req.Query.TryGetValue("range", out var rangeStr))
+            {
+                WriteJson(s, 400, new { Error = "lat, lon, range required." });
+                return;
+            }
+            if (!double.TryParse(latStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lat) ||
+                !double.TryParse(lonStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lon) ||
+                !double.TryParse(rangeStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var range))
+            {
+                WriteJson(s, 400, new { Error = "Invalid lat/lon/range." });
+                return;
+            }
+            WriteJson(s, 200, _asd.GetAircraft(lat, lon, range));
+            return;
+        }
+
         WriteJson(s, 404, new { Error = "Not found." });
+    }
+
+    private byte[]? GetFontBytes()
+    {
+        if (_fontCache is not null) return _fontCache;
+
+        // Look for Terminus Bold in standard font locations
+        var candidates = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "TerminusTTF-Bold_B.ttf"),
+            @"C:\Windows\Fonts\TerminusTTF-Bold_B.ttf",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "Windows", "Fonts", "TerminusTTF-Bold_B.ttf"),
+        };
+
+        foreach (var path in candidates)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    _fontCache = File.ReadAllBytes(path);
+                    return _fontCache;
+                }
+            }
+            catch { }
+        }
+
+        return null;
+    }
+
+    private static void WriteFontResponse(NetworkStream s, byte[] body)
+    {
+        var header =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: font/ttf\r\n" +
+            "Content-Length: " + body.Length + "\r\n" +
+            "Connection: close\r\n" +
+            "Cache-Control: public, max-age=604800\r\n" +
+            "Access-Control-Allow-Origin: *\r\n\r\n";
+
+        var hdr = Encoding.ASCII.GetBytes(header);
+        s.Write(hdr, 0, hdr.Length);
+        s.Write(body, 0, body.Length);
     }
 
     private void WriteJson(NetworkStream s, int code, object payload)

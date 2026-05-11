@@ -46,9 +46,11 @@ public static class GroundMapData
         public string Name { get; set; } = "";
         public string Folder { get; set; } = "";
         public int Priority { get; set; }
+        public string CustomColour { get; set; } = "";
         public List<InfillPolygon> Infills { get; set; } = new();
         public List<MapLine> Lines { get; set; } = new();
         public List<MapLabel> Labels { get; set; } = new();
+        public List<MapSymbol> Symbols { get; set; } = new();
     }
 
     /// <summary>Lightweight map metadata for dropdown menu (no geometry).</summary>
@@ -68,12 +70,21 @@ public static class GroundMapData
     public sealed class MapLine
     {
         public string Name { get; set; } = "";
+        public string Pattern { get; set; } = "";
+        public double Width { get; set; } = 1;
         public List<double[]> Points { get; set; } = new();
     }
 
     public sealed class MapLabel
     {
         public string Text { get; set; } = "";
+        public double Lat { get; set; }
+        public double Lon { get; set; }
+    }
+
+    public sealed class MapSymbol
+    {
+        public string SymbolType { get; set; } = "";
         public double Lat { get; set; }
         public double Lon { get; set; }
     }
@@ -95,6 +106,8 @@ public static class GroundMapData
         public int[] SelectedButton { get; set; } = { 0, 0, 96 };
         public int[] InteractiveText { get; set; } = { 0, 0, 96 };
         public int[] GenericText { get; set; } = { 96, 0, 0 };
+        public int[] Release { get; set; } = { 52, 59, 198 };
+        public int[] Crossing { get; set; } = { 255, 0, 0 };
     }
 
     // ---- Position discovery ----
@@ -385,7 +398,8 @@ public static class GroundMapData
 
                         needed.Remove(key);
                         var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 99;
-                        var layer = new MapLayer { Type = type, Name = name, Folder = folder, Priority = priority };
+                        var customColour = mapElem.Attribute("CustomColourName")?.Value ?? "";
+                        var layer = new MapLayer { Type = type, Name = name, Folder = folder, Priority = priority, CustomColour = customColour };
 
                         ParseMapGeometry(mapElem, layer);
 
@@ -416,8 +430,9 @@ public static class GroundMapData
                 var type = mapElem.Attribute("Type")?.Value ?? "";
                 var name = mapElem.Attribute("Name")?.Value ?? "";
                 var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 99;
+                var customColour = mapElem.Attribute("CustomColourName")?.Value ?? "";
 
-                var layer = new MapLayer { Type = type, Name = name, Folder = folder, Priority = priority };
+                var layer = new MapLayer { Type = type, Name = name, Folder = folder, Priority = priority, CustomColour = customColour };
                 ParseMapGeometry(mapElem, layer);
 
                 if (layer.Infills.Count > 0 || layer.Lines.Count > 0 || layer.Labels.Count > 0)
@@ -521,6 +536,11 @@ public static class GroundMapData
                     case "SelectedWindowButton": colours.SelectedButton = rgb; break;
                     case "InteractiveText": colours.InteractiveText = rgb; break;
                     case "GenericText": colours.GenericText = rgb; break;
+                    case "Custom":
+                        var name = elem.Element("Name")?.Value ?? "";
+                        if (name.Equals("Release", StringComparison.OrdinalIgnoreCase)) colours.Release = rgb;
+                        else if (name.Equals("Crossing", StringComparison.OrdinalIgnoreCase)) colours.Crossing = rgb;
+                        break;
                 }
             }
         }

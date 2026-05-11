@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Windows.Forms;
 using vatsys;
 
 namespace VatSysExternalWindows;
@@ -20,9 +22,8 @@ public sealed class GroundDataService
     private GroundMapData.ColourSet? _colours;
     private List<GroundMapData.GroundMapMeta>? _groundMaps;
 
-    // Position history: callsign -> ring buffer of [lat,lon,hdg]
-    private readonly Dictionary<string, List<double[]>> _history = new(StringComparer.OrdinalIgnoreCase);
-    private const int MaxHistoryDots = 10;
+    // Position history: use vatSys RadarTrack.PositionHistory directly
+    // Dot count controlled by MMI.HistoryDots user setting (default 5, max 9)
 
     /// <summary>Returns all ASMGCS positions from the profile.</summary>
     public List<GroundMapData.GroundPosition> GetPositions()
@@ -115,7 +116,17 @@ public sealed class GroundDataService
                 var onGround = false;
 
                 try { onGround = track.OnGround; } catch { }
-                try { heading = track.Heading; } catch { }
+                // vatSys uses networkPilot.Heading (aircraft nose direction) for ground symbols,
+                // NOT track.Heading (calculated track/movement direction). These differ during pushback.
+                try
+                {
+                    var pilot = track.ActualAircraft;
+                    if (pilot is not null)
+                        heading = pilot.Heading;
+                    else
+                        heading = track.Heading;
+                }
+                catch { try { heading = track.Heading; } catch { } }
                 try { groundSpeed = track.GroundSpeed; } catch { }
 
                 try
@@ -141,7 +152,8 @@ public sealed class GroundDataService
                 var runway = "";
                 try
                 {
-                    var fdr = track.CoupledFDR ?? track.ASMGCSCoupledFDR;
+                    // vatSys: ASMGCSCoupledFDR takes precedence over CoupledFDR for ground display
+                    var fdr = track.ASMGCSCoupledFDR ?? track.CoupledFDR;
                     if (fdr is not null)
                     {
                         var dep = fdr.DepAirport ?? "";
@@ -160,8 +172,33 @@ public sealed class GroundDataService
                 }
                 catch { }
 
-                // Record position for trail dots
-                RecordPosition(callsign, lat, lon, heading);
+                // Get position history trail dots from vatSys RadarTrack.PositionHistory
+                double[][]? history = null;
+                var maxDots = MMI.HistoryDots; // user setting (0=off, 1-9)
+                try
+                {
+                    if (maxDots > 0)
+                    {
+                        var posHist = track.PositionHistory?.ToArray();
+                        if (posHist is not null && posHist.Length > 0)
+                        {
+                            var dots = new List<double[]>();
+                            // Newest first (iterate backwards), limit to user setting
+                            for (int i = posHist.Length - 1; i >= 0 && dots.Count < maxDots; i--)
+                            {
+                                var h = posHist[i];
+                                if (h?.LatLong is null) continue;
+                                dots.Add(new[] { Math.Round(h.LatLong.Latitude, 7), Math.Round(h.LatLong.Longitude, 7) });
+                            }
+                            if (dots.Count > 0) history = dots.ToArray();
+                        }
+                    }
+                }
+                catch { }
+
+                // Get altitude for GroundAir label
+                var altitude = -1;
+                try { altitude = track.CorrectedAltitude; } catch { }
 
                 result.Add(new AircraftDto
                 {
@@ -170,12 +207,13 @@ public sealed class GroundDataService
                     Lon = Math.Round(lon, 7),
                     Hdg = Math.Round(heading, 1),
                     Gs = Math.Round(groundSpeed, 0),
+                    Alt = altitude,
                     OnGround = onGround,
                     Category = category,
                     WakeCat = wakeCat,
                     AircraftType = aircraftType,
                     Runway = runway,
-                    History = GetHistory(callsign),
+                    History = history,
                 });
             }
             catch { }
@@ -184,49 +222,50 @@ public sealed class GroundDataService
         return result;
     }
 
-    /// <summary>Records current position and returns history (excluding current).</summary>
-    private double[][]? GetHistory(string callsign)
+    /// <summary>Returns the currently visible crossing/released map layer keys from vatSys Ground windows.</summary>
+    public List<string> GetVisibleCrossingReleasedMaps()
     {
-        if (string.IsNullOrEmpty(callsign)) return null;
-
-        lock (_history)
+        var result = new List<string>();
+        try
         {
-            if (!_history.TryGetValue(callsign, out var list))
-                return null;
-
-            if (list.Count == 0) return null;
-            var arr = new double[list.Count][];
-            for (int i = 0; i < list.Count; i++)
-                arr[i] = list[i];
-            return arr;
-        }
-    }
-
-    /// <summary>Records a position for trail dot history.</summary>
-    public void RecordPosition(string callsign, double lat, double lon, double hdg)
-    {
-        if (string.IsNullOrEmpty(callsign)) return;
-
-        lock (_history)
-        {
-            if (!_history.TryGetValue(callsign, out var list))
+            // Find ASMGCS Ground windows via Application.OpenForms
+            foreach (Form form in Application.OpenForms)
             {
-                list = new List<double[]>();
-                _history[callsign] = list;
-            }
+                if (form.GetType().Name != "ASMGCSWindow") continue;
 
-            // Don't add if position hasn't changed
-            if (list.Count > 0)
-            {
-                var last = list[list.Count - 1];
-                if (Math.Abs(last[0] - lat) < 0.00001 && Math.Abs(last[1] - lon) < 0.00001)
-                    return;
-            }
+                // Get the ASDControlDX field via reflection (it's a private field)
+                var field = form.GetType().GetField("asmgcsControlDX1",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field is null) continue;
 
-            list.Add(new[] { Math.Round(lat, 7), Math.Round(lon, 7) });
-            while (list.Count > MaxHistoryDots)
-                list.RemoveAt(0);
+                var asdControl = field.GetValue(form);
+                if (asdControl is null) continue;
+
+                // Call public IsMapVisible for each crossing/released map
+                var isVisibleMethod = asdControl.GetType().GetMethod("IsMapVisible");
+                if (isVisibleMethod is null) continue;
+
+                foreach (var map in DisplayMaps.Maps)
+                {
+                    if (map.Category != DisplayMaps.MapCategories.Ground) continue;
+                    if (string.IsNullOrEmpty(map.CustomColourName)) continue;
+                    if (!map.CustomColourName.Equals("Release", StringComparison.OrdinalIgnoreCase) &&
+                        !map.CustomColourName.Equals("Crossing", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var visible = (bool)(isVisibleMethod.Invoke(asdControl, new object[] { map }) ?? false);
+                    if (visible)
+                    {
+                        var key = string.IsNullOrEmpty(map.Folder) ? map.Name : map.Folder + "/" + map.Name;
+                        result.Add(key);
+                    }
+                }
+
+                break; // Only need one Ground window
+            }
         }
+        catch { }
+        return result;
     }
 
     private void EnsureProfileDir()
@@ -308,6 +347,7 @@ public sealed class AircraftDto
     public double Lon { get; set; }
     public double Hdg { get; set; }
     public double Gs { get; set; }
+    public int Alt { get; set; } = -1;
     public bool OnGround { get; set; }
     public string Category { get; set; } = "unknown";
     public string WakeCat { get; set; } = "";
