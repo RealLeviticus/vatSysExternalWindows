@@ -6,3 +6,4 @@ obj/
 *.cache
 Debug/
 Release/
+dist/

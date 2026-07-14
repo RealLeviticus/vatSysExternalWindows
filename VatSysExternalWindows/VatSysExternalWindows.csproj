@@ -10,7 +10,11 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <RootNamespace>VatSysExternalWindows</RootNamespace>
     <AssemblyName>VatSysExternalWindows</AssemblyName>
-    <Version>0.0.1</Version>
+    <Version>1.0.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0.0</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ProgramFilesX86 Condition="'$(ProgramFilesX86)' == ''">C:\Program Files (x86)</ProgramFilesX86>
     <VatSysDir Condition="'$(VatSysDir)' == ''">$(ProgramFilesX86)\vatSys</VatSysDir>
     <VatSysExe Condition="'$(VatSysExe)' == ''">$(VatSysDir)\bin\vatSys.exe</VatSysExe>

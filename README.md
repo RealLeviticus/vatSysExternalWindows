@@ -1,25 +1,29 @@
-# vatSys External Ground Windows
+# vatSys External Windows
 
-A vatSys plugin that serves a real-time A-SMGCS (Advanced Surface Movement Guidance and Control System) ground map to any browser on your local network — designed for iPad use alongside vatSys on your PC.
+A vatSys plugin that serves browser-based Ground (A-SMGCS) and Air (ASD) displays to devices on your local network. It is designed for an iPad or other secondary display used alongside vatSys on your PC.
 
 ## Features
 
-- **Pixel-accurate ground map rendering** — matches the native vatSys Ground window: same colours, symbols, fonts, labels, and map layers from the loaded profile
-- **Live aircraft tracking** — departure, arrival, local, and unknown tracks with category-based colouring, wake-category-sized diamond symbols, and position history trail dots
-- **Airborne symbol transition** — aircraft change from ground diamonds to ModeS circles when they leave the ground
-- **Full profile support** — reads Positions.xml, Maps/, Colours.xml, and Tracks.xml definitions from whichever profile vatSys has loaded
+- **Ground and Air displays** — choose an A-SMGCS Ground window or an ASD Air window from the browser landing page
+- **Profile-driven rendering** — uses the loaded profile's colours, symbols, fonts, labels, positions, map layers, ranges, and rotations to closely reproduce the corresponding vatSys window
+- **Live aircraft tracking** — refreshes tracks twice per second with ground/air symbol selection, category or jurisdiction colouring, velocity vectors, and history dots where applicable
+- **Runtime map synchronisation** — Ground crossing/release maps follow vatSys visibility; ASD sector infill and active restricted areas refresh automatically
+- **Full profile support** — reads `Positions.xml`, `Maps\`, `Colours.xml`, `Tracks.xml`, and related settings from whichever profile vatSys has loaded
 - **On-demand map loading** — layers load individually when toggled, keeping the initial page load fast
-- **Touch-optimised UI** — pan, pinch-zoom, scroll-zoom, double-tap reset; inline accordion menus for touch-friendly map/position selection
+- **Touch-optimised UI** — pan, pinch-zoom, scroll-zoom, double-tap reset, movable labels, and touch-friendly map/position menus
 - **Self-contained** — single plugin DLL, no external dependencies beyond vatSys itself
 
 ## How It Works
 
-The plugin starts a lightweight HTTP server on **port 5300** inside the vatSys process. It serves an HTML5 Canvas web application that:
+The plugin starts a lightweight HTTP server on **port 5300** inside the vatSys process. It listens on the PC's network interfaces so other devices on the same local network can connect. It serves HTML5 Canvas applications that:
 
-1. Fetches ASMGCS positions and map metadata from the profile via `/api/airports` and `/api/groundmaps`
-2. Loads map layer geometry on demand via `/api/maplayers`
-3. Polls `/api/aircraft` every 2 seconds for live radar tracks near the selected airport
-4. Renders everything client-side on a `<canvas>` element using the exact vatSys rendering rules
+1. Fetch Ground or ASD positions and map metadata from the currently loaded profile
+2. Load selected map-layer geometry on demand
+3. Poll live radar tracks every 500 milliseconds
+4. Refresh runtime ASD sector/restricted-area maps every 5 seconds
+5. Render the display client-side on a `<canvas>` using profile data and vatSys-style rendering rules
+
+The server has no login or encryption and is intended only for a trusted local network. Do not expose port `5300` directly to the internet.
 
 ### API Endpoints
 
@@ -34,7 +38,11 @@ The plugin starts a lightweight HTTP server on **port 5300** inside the vatSys p
 | `GET /api/map?icao=XXXX` | Full map data for an airport (legacy endpoint) |
 | `GET /api/aircraft?icao=XXXX` | Live aircraft near an airport with callsign, position, heading, groundspeed, radar flags, squawk, wake category, type, runway, on-ground state, category, and position history |
 | `GET /api/visiblemaps` | Crossing/Release map layers currently visible in the vatSys Ground window |
-| `GET /api/asd/positions`, `/api/asd/maps`, `/api/asd/maplayers`, `/api/asd/aircraft` | Air window equivalents |
+| `GET /api/asd/positions` | ASD positions from the loaded profile |
+| `GET /api/asd/maps` | ASD map metadata, colours, velocity-vector setting, and transition altitude |
+| `GET /api/asd/dynamicmaps` | Runtime controlled-sector infill and active restricted areas |
+| `GET /api/asd/maplayers?maps=Folder/Name,...` | Geometry for selected ASD map layers |
+| `GET /api/asd/aircraft?lat=...&lon=...&range=...` | Live aircraft within the requested ASD viewport |
 
 ### Rendering Details
 
@@ -56,8 +64,10 @@ The plugin starts a lightweight HTTP server on **port 5300** inside the vatSys p
 
 ## Build Requirements
 
-- .NET Framework 4.8.1 build tools (x86 target)
+- Windows with .NET Framework 4.8.1 build tools (x86 target)
 - vatSys installed locally (for the `vatSys.exe` assembly reference)
+- Visual Studio or Build Tools with MSBuild for `build-release.ps1`
+- PowerShell 5.1 or later for release packaging
 
 ## Build
 
@@ -67,24 +77,89 @@ From the workspace root:
 dotnet build .\VatSysExternalWindows\VatSysExternalWindows.csproj -p:VatSysDir="C:\Program Files (x86)\vatSys"
 ```
 
-Override output directory:
+To create a release folder and versioned ZIP under `dist\`:
 
 ```powershell
-dotnet build .\VatSysExternalWindows\VatSysExternalWindows.csproj ^
-  -p:VatSysDir="C:\Program Files (x86)\vatSys" ^
+.\build-release.ps1
+```
+
+Pass `-OpenZip` to open the completed ZIP in Windows Explorer.
+
+Override the normal build output directory from PowerShell:
+
+```powershell
+dotnet build .\VatSysExternalWindows\VatSysExternalWindows.csproj `
+  -p:VatSysDir="C:\Program Files (x86)\vatSys" `
   -p:VatSysProfilePluginsDir="C:\Path\To\Profiles\Australia\Plugins\VatSysExternalWindows\"
 ```
 
 Default output: `%UserProfile%\Documents\vatSys Files\Profiles\Australia\Plugins\VatSysExternalWindows\`
 
-## Usage
+## Install and Access the Display
 
-1. Build the plugin and ensure the DLL is in your profile's `Plugins\VatSysExternalWindows\` folder
-2. Start vatSys — the plugin loads automatically and starts the web server on port 5300
-3. On your iPad (or any device on the same network), open `http://<your-pc-ip>:5300/`
-4. Select a position from the **Position** dropdown to center the map and load the default layers
-5. Toggle map layers on/off from the **Maps** dropdown
-6. Aircraft appear automatically when a position is selected
+### 1. Install the plugin
+
+Extract the release ZIP and copy the `VatSysExternalWindows` folder into the `Plugins` folder of the vatSys profile you use. For the standard Australian profile, this is normally:
+
+```text
+C:\Users\<your-Windows-username>\Documents\vatSys Files\Profiles\Australia\Plugins\VatSysExternalWindows
+```
+
+The installed folder must contain `VatSysExternalWindows.dll`. Restart vatSys after installing or updating the plugin.
+
+### 2. Start vatSys
+
+Open vatSys and load your profile. The plugin starts its web server automatically on port `5300`—there is no separate program to run.
+
+To confirm it is working on the vatSys PC, open this address in a browser on that PC:
+
+```text
+http://localhost:5300/
+```
+
+The landing page provides buttons for the Ground and Air displays. You can also open them directly at `http://localhost:5300/ground` and `http://localhost:5300/asd`.
+
+### 3. Find your vatSys PC's IP address
+
+The easiest method on Windows is:
+
+1. Press **Windows + R**, type `cmd`, and press **Enter**.
+2. Run `ipconfig`.
+3. Find the active **Wireless LAN adapter Wi-Fi** or **Ethernet adapter** section.
+4. Note its **IPv4 Address**, such as `192.168.1.42` or `10.0.0.15`.
+
+Use the address for the adapter connected to the same home or workplace network as your iPad. Ignore disconnected adapters and addresses belonging to VPNs, virtual machines, or Bluetooth connections.
+
+You can also find it in **Windows Settings → Network & internet → Wi-Fi (or Ethernet) → Properties**, under **IPv4 address**.
+
+### 4. Open the display on another device
+
+Connect the iPad, tablet, laptop, or phone to the same local network as the vatSys PC. In its web browser, enter:
+
+```text
+http://<your-pc-ip>:5300/
+```
+
+For example, if the PC's IPv4 address is `192.168.1.42`, open:
+
+```text
+http://192.168.1.42:5300/
+```
+
+Keep vatSys running while using the display. From the landing page, choose **Ground Display** or **Air Display**, then select a position. The default map layers load automatically, aircraft update live, and additional layers can be toggled from the **Maps** menu.
+
+The **Tools** menu mirrors the vatSys layout, but its listed operational tools are currently placeholders and are not interactive.
+
+> The address can change when the PC reconnects to the network or the router restarts. If a previously saved address stops working, check `ipconfig` again.
+
+### Connection Troubleshooting
+
+- If `http://localhost:5300/` does not open on the vatSys PC, confirm vatSys is running, the correct profile is loaded, and the DLL is in that profile's plugin folder.
+- If it works on the PC but not on another device, confirm both devices are on the same network and that the URL begins with `http://`, not `https://`.
+- If Windows Firewall prompts for access, allow vatSys on **Private networks**. Public network access is not normally required.
+- Guest Wi-Fi and some managed networks block communication between devices. Connect both devices to a normal private Wi-Fi or Ethernet network.
+- Temporarily disconnecting a VPN can help if it is routing local traffic through a different adapter.
+- Port `5300` must be available. Another application using that port can prevent the plugin server from starting.
 
 ### Touch Controls
 
@@ -94,19 +169,24 @@ Default output: `%UserProfile%\Documents\vatSys Files\Profiles\Australia\Plugins
 | Pinch | Zoom in/out (centered on pinch midpoint) |
 | Scroll wheel | Zoom in/out (centered on cursor) |
 | Double-tap / double-click | Reset pan and zoom to the position's defaults |
+| Tap/click an aircraft symbol, then tap/click a new location | Reposition that aircraft's label in the browser display |
 
 ## Project Structure
 
-```
-VatSysExternalWindows/
-├── ExternalWindowsPlugin.cs   # IPlugin entry point, starts/stops the web server
-├── EmbeddedWebServer.cs       # TCP HTTP server with JSON API routing
-├── ProfileLocator.cs          # Resolves the loaded profile directory (DatasetPath)
-├── GroundDataService.cs       # Reads vatSys runtime data (positions, tracks, aircraft)
-├── GroundMapData.cs           # Parses profile XML files (maps, colours, coordinates)
-├── AsdDataService.cs          # ASD (air window) positions, maps, colours, aircraft
-├── LandingPage.cs             # Landing page for choosing a window type
-├── WebUiPage.cs               # Ground window HTML/CSS/JS app as a C# string constant
-├── AsdUiPage.cs               # Air window HTML/CSS/JS app as a C# string constant
-└── VatSysExternalWindows.csproj
+```text
+vatSysExternalWindows/
+├── build-release.ps1          # Release rebuild and versioned ZIP packaging
+├── README.md
+└── VatSysExternalWindows/
+    ├── ExternalWindowsPlugin.cs   # IPlugin entry point; starts/stops the server
+    ├── EmbeddedWebServer.cs       # TCP HTTP server and JSON API routing
+    ├── ProfileLocator.cs          # Resolves the currently loaded profile directory
+    ├── GroundDataService.cs       # Ground positions, tracks, symbols, and runtime data
+    ├── GroundMapData.cs           # Profile map, colour, and coordinate parsing
+    ├── AsdDataService.cs          # ASD positions, maps, tracks, and dynamic layers
+    ├── TrackSymbolData.cs         # Tracks.xml/default symbol geometry parsing
+    ├── LandingPage.cs             # Ground/Air display chooser
+    ├── WebUiPage.cs               # Embedded Ground display HTML/CSS/JavaScript
+    ├── AsdUiPage.cs               # Embedded ASD display HTML/CSS/JavaScript
+    └── VatSysExternalWindows.csproj
 ```
