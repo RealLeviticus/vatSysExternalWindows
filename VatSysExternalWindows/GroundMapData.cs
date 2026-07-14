@@ -64,6 +64,12 @@ public static class GroundMapData
     public sealed class InfillPolygon
     {
         public string Name { get; set; } = "";
+        /// <summary>Infill Type attribute: "" (Normal), "Background" or "None".
+        /// Background infills paint in the window's background colour.</summary>
+        public string InfillType { get; set; } = "";
+        /// <summary>Infill Pattern (inherits the Map's Pattern): non-solid patterns
+        /// fill with the Infill/Background checkerboard on the air window.</summary>
+        public string Pattern { get; set; } = "";
         public List<double[]> Points { get; set; } = new();
     }
 
@@ -108,6 +114,9 @@ public static class GroundMapData
         public int[] GenericText { get; set; } = { 96, 0, 0 };
         public int[] Release { get; set; } = { 52, 59, 198 };
         public int[] Crossing { get; set; } = { 255, 0, 0 };
+        /// <summary>All Custom colours from Colours.xml by name — vatSys resolves any
+        /// map CustomColourName via Colours.GetCustomColorDX.</summary>
+        public Dictionary<string, int[]> CustomColours { get; set; } = new();
     }
 
     // ---- Position discovery ----
@@ -444,46 +453,49 @@ public static class GroundMapData
 
     private static void ParseMapGeometry(XElement mapElem, MapLayer layer)
     {
+        // vatSys: lines and infills without their own Pattern inherit the Map's Pattern
+        var mapPattern = mapElem.Attribute("Pattern")?.Value ?? "";
+
+        // vatSys LoadMaps uses GetElementsByTagName, which searches ALL descendants —
+        // maps like ASMGCS.xml nest <Line> elements inside <Label>. Use Descendants
+        // throughout to match.
+
         // Infills (filled polygons)
-        foreach (var infillElem in mapElem.Elements("Infill"))
+        foreach (var infillElem in mapElem.Descendants("Infill"))
         {
             var infillName = infillElem.Attribute("Name")?.Value ?? "";
-            var pointElem = infillElem.Element("Point");
-            if (pointElem is null) continue;
+            var infillType = infillElem.Attribute("Type")?.Value ?? "";
+            var infillPattern = infillElem.Attribute("Pattern")?.Value ?? mapPattern;
+            var raw = infillElem.Element("Point")?.Value ?? infillElem.Value;
+            if (string.IsNullOrWhiteSpace(raw)) continue;
 
-            var polygon = ParsePolygonPoints(infillName, pointElem.Value);
+            var polygon = ParsePolygonPoints(infillName, raw);
+            polygon.InfillType = infillType;
+            polygon.Pattern = infillPattern;
             if (polygon.Points.Count >= 3)
                 layer.Infills.Add(polygon);
         }
 
-        // Lines
-        foreach (var lineElem in mapElem.Elements("Line"))
+        // Lines — slash-separated coordinates either wrapped in a <Point> child
+        // or as the element's direct text (vatSys reads InnerText)
+        foreach (var lineElem in mapElem.Descendants("Line"))
         {
             var lineName = lineElem.Attribute("Name")?.Value ?? "";
-            var pointElem = lineElem.Element("Point");
-            if (pointElem is not null)
-            {
-                var line = ParseLinePoints(lineName, pointElem.Value);
-                if (line.Points.Count >= 2)
-                    layer.Lines.Add(line);
-            }
-            else
-            {
-                // Points as direct child elements forming a polyline
-                var multiLine = new MapLine { Name = lineName };
-                foreach (var ptElem in lineElem.Elements("Point"))
-                {
-                    var (ptLat, ptLon) = ParseCoordinate(ptElem.Value.Trim());
-                    if (ptLat != 0 || ptLon != 0)
-                        multiLine.Points.Add(new[] { Math.Round(ptLat, 8), Math.Round(ptLon, 8) });
-                }
-                if (multiLine.Points.Count >= 2)
-                    layer.Lines.Add(multiLine);
-            }
+            var linePattern = lineElem.Attribute("Pattern")?.Value ?? mapPattern;
+            var lineWidth = double.TryParse(lineElem.Attribute("Width")?.Value,
+                NumberStyles.Float, CultureInfo.InvariantCulture, out var w) ? w : 1.0;
+            var raw = lineElem.Element("Point")?.Value ?? lineElem.Value;
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+
+            var line = ParseLinePoints(lineName, raw);
+            line.Pattern = linePattern;
+            line.Width = lineWidth;
+            if (line.Points.Count >= 2)
+                layer.Lines.Add(line);
         }
 
         // Labels
-        foreach (var labelElem in mapElem.Elements("Label"))
+        foreach (var labelElem in mapElem.Descendants("Label"))
         {
             foreach (var ptElem in labelElem.Elements("Point"))
             {
@@ -519,6 +531,8 @@ public static class GroundMapData
                 var rgb = ReadRgb(elem);
                 if (rgb is null) continue;
 
+                // ids match the vatsys.Colours.Identities enum names; vatSys also
+                // accepts the historical "WindowBackgound" misspelling.
                 switch (id)
                 {
                     case "GroundBackground": colours.Background = rgb; break;
@@ -531,13 +545,16 @@ public static class GroundMapData
                     case "GroundDeparture": colours.Departure = rgb; break;
                     case "GroundUnknown": colours.Unknown = rgb; break;
                     case "GroundLocal": colours.Local = rgb; break;
-                    case "WindowBackground": colours.WindowBackground = rgb; break;
-                    case "DepressedWindowButton": colours.DepressedButton = rgb; break;
-                    case "SelectedWindowButton": colours.SelectedButton = rgb; break;
+                    case "WindowBackground":
+                    case "WindowBackgound": colours.WindowBackground = rgb; break;
+                    case "WindowButtonDepressed": colours.DepressedButton = rgb; break;
+                    case "WindowButtonSelected": colours.SelectedButton = rgb; break;
                     case "InteractiveText": colours.InteractiveText = rgb; break;
                     case "GenericText": colours.GenericText = rgb; break;
                     case "Custom":
                         var name = elem.Element("Name")?.Value ?? "";
+                        if (string.IsNullOrWhiteSpace(name)) break;
+                        colours.CustomColours[name] = rgb;
                         if (name.Equals("Release", StringComparison.OrdinalIgnoreCase)) colours.Release = rgb;
                         else if (name.Equals("Crossing", StringComparison.OrdinalIgnoreCase)) colours.Crossing = rgb;
                         break;

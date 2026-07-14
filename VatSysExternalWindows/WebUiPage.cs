@@ -84,27 +84,90 @@ let panX=0,panY=0;
 let layerState={};
 let aircraft=[];
 let acTimer=null;
+let labelFontSize=18,mapFontSize=16;
 
 /* ============================================================
-   Symbol geometry - exact from Tracks.xml
-   Ground: StrokeWidth=1, FigureBegin=Filled → filled + 1px stroke
-   GroundLight/Medium/Heavy/Super: StrokeWidth=0, FigureBegin=Filled → filled only
+   Track symbols — served from the profile's Tracks.xml via
+   /api/symbols, rendered exactly like vatSys geometry
+   realisations: StrokeWidth 0 → filled (Filled figures only),
+   otherwise stroked outline of that width. Ground* symbols
+   rotate to the aircraft heading; others are screen-fixed.
+   SpecialCode variants keyed by squawk code.
    ============================================================ */
-const SYMBOLS={
-  Ground:      {pts:[[0,-7.5],[-5.5,3.5],[0,7.5],[5.5,3.5]], sw:1},
-  GroundLight: {pts:[[0,-5.5],[-3.5,1.5],[0,5.5],[3.5,1.5]], sw:0},
-  GroundMedium:{pts:[[0,-7.5],[-5.5,3.5],[0,7.5],[5.5,3.5]], sw:0},
-  GroundHeavy: {pts:[[0,-9],[-7,5],[0,9],[7,5]], sw:0},
-  GroundSuper: {pts:[[0,-10],[-9,6.5],[0,10],[9,6.5]], sw:0}
-};
-function wakeSymbol(w){
-  switch((w||'').toUpperCase()){
-    case'L':return SYMBOLS.GroundLight;
-    case'M':return SYMBOLS.GroundMedium;
-    case'H':return SYMBOLS.GroundHeavy;
-    case'J':return SYMBOLS.GroundSuper;
-    default:return SYMBOLS.Ground;
+let symTable={};
+function symKey(t,c){return t+'|'+c;}
+function buildSymTable(defs){
+  symTable={};
+  for(let d of defs) symTable[symKey(d.Type,d.SpecialCode)]=d;
+}
+// Fallback: Australia profile defaults, used until /api/symbols loads
+buildSymTable([
+ {Type:'Primary',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[-6,0],Filled:false,Closed:false,Segs:[{T:'l',P:[6,0]}]},
+   {Start:[0,6],Filled:false,Closed:false,Segs:[{T:'l',P:[0,-6]}]}]}]},
+ {Type:'ModeS',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:6.5,RadiusY:6.5}]},
+ {Type:'HistoryMarker',SpecialCode:-1,StrokeWidth:0,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:2,RadiusY:2}]},
+ {Type:'Selection',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[11,-5],Filled:false,Closed:true,Segs:[{T:'l',P:[5,-11]},{T:'l',P:[-5,-11]},{T:'l',P:[-11,-5]},{T:'l',P:[-11,5]},{T:'l',P:[-5,11]},{T:'l',P:[5,11]},{T:'l',P:[11,5]}]}]}]},
+ {Type:'Ground',SpecialCode:-1,StrokeWidth:1,Rotate:true,Shapes:[{Kind:'path',Figures:[
+   {Start:[0,-7.5],Filled:true,Closed:true,Segs:[{T:'l',P:[-5.5,3.5]},{T:'l',P:[0,7.5]},{T:'l',P:[5.5,3.5]}]}]}]},
+ {Type:'GroundLight',SpecialCode:-1,StrokeWidth:0,Rotate:true,Shapes:[{Kind:'path',Figures:[
+   {Start:[0,-5.5],Filled:true,Closed:true,Segs:[{T:'l',P:[-3.5,1.5]},{T:'l',P:[0,5.5]},{T:'l',P:[3.5,1.5]}]}]}]},
+ {Type:'GroundMedium',SpecialCode:-1,StrokeWidth:0,Rotate:true,Shapes:[{Kind:'path',Figures:[
+   {Start:[0,-7.5],Filled:true,Closed:true,Segs:[{T:'l',P:[-5.5,3.5]},{T:'l',P:[0,7.5]},{T:'l',P:[5.5,3.5]}]}]}]},
+ {Type:'GroundHeavy',SpecialCode:-1,StrokeWidth:0,Rotate:true,Shapes:[{Kind:'path',Figures:[
+   {Start:[0,-9],Filled:true,Closed:true,Segs:[{T:'l',P:[-7,5]},{T:'l',P:[0,9]},{T:'l',P:[7,5]}]}]}]},
+ {Type:'GroundSuper',SpecialCode:-1,StrokeWidth:0,Rotate:true,Shapes:[{Kind:'path',Figures:[
+   {Start:[0,-10],Filled:true,Closed:true,Segs:[{T:'l',P:[-9,6.5]},{T:'l',P:[0,10]},{T:'l',P:[9,6.5]}]}]}]}
+]);
+function getSymbol(type,ssr){
+  return symTable[symKey(type,ssr)]||symTable[symKey(type,-1)]||null;
+}
+function traceShape(sh,fillOnly){
+  // Returns true if anything was traced
+  if(sh.Kind==='ellipse'){
+    ctx.beginPath();
+    ctx.ellipse(sh.Center?sh.Center[0]:0,sh.Center?sh.Center[1]:0,sh.RadiusX,sh.RadiusY,0,0,Math.PI*2);
+    return true;
   }
+  if(sh.Kind==='rect'){
+    let tl=sh.TopLeft||[0,0],br=sh.BottomRight||[0,0];
+    ctx.beginPath();
+    ctx.rect(tl[0],tl[1],br[0]-tl[0],br[1]-tl[1]);
+    return true;
+  }
+  if(sh.Kind==='path'&&sh.Figures){
+    ctx.beginPath();
+    let traced=false;
+    for(let f of sh.Figures){
+      if(fillOnly&&!f.Filled) continue; // Hollow figures excluded from fills (D2D FigureBegin)
+      ctx.moveTo(f.Start[0],f.Start[1]);
+      let cur=f.Start;
+      for(let s of f.Segs){
+        if(s.T==='b'&&s.B){ctx.bezierCurveTo(s.B[0][0],s.B[0][1],s.B[1][0],s.B[1][1],s.B[2][0],s.B[2][1]);cur=s.B[2];}
+        else if(s.P){ctx.lineTo(s.P[0],s.P[1]);cur=s.P;}
+      }
+      if(f.Closed) ctx.closePath();
+      traced=true;
+    }
+    return traced;
+  }
+  return false;
+}
+function drawSymbol(type,ssr,x,y,headingDeg,col){
+  let def=getSymbol(type,ssr);
+  if(!def) return;
+  ctx.save();
+  ctx.translate(x,y);
+  if(def.Rotate&&headingDeg!=null&&headingDeg!==-1)
+    ctx.rotate((headingDeg+rotation+magVar)*Math.PI/180);
+  let filled=def.StrokeWidth===0;
+  for(let sh of def.Shapes){
+    if(!traceShape(sh,filled)) continue;
+    if(filled){ctx.fillStyle=col;ctx.fill();}
+    else{ctx.strokeStyle=col;ctx.lineWidth=def.StrokeWidth;ctx.stroke();}
+  }
+  ctx.restore();
 }
 
 /* ============================================================
@@ -115,7 +178,8 @@ function nmToDegLon(lat){return 1/(60*Math.cos(lat*Math.PI/180));}
 function latLonToCanvas(lat,lon){
   let dlat=lat-centerLat,dlon=lon-centerLon;
   let xNm=dlon/nmToDegLon(centerLat),yNm=dlat/NM_TO_DEG_LAT;
-  let scale=Math.min(W,H)/(nmRange*2);
+  // vatSys SetZoom: DefaultRange spans the full window WIDTH in NM
+  let scale=W/nmRange;
   let rx=xNm*scale,ry=-yNm*scale;
   let totalRot=rotation+magVar;
   let rad=totalRot*Math.PI/180;
@@ -156,12 +220,23 @@ function applyTheme(){
     '.dd-item.disabled{color:'+disabledCol+';}';
 }
 
+function findCustomColour(name){
+  if(!colours||!colours.CustomColours) return null;
+  if(colours.CustomColours[name]) return colours.CustomColours[name];
+  let lower=name.toLowerCase();
+  for(let k in colours.CustomColours) if(k.toLowerCase()===lower) return colours.CustomColours[k];
+  return null;
+}
 function typeColour(type,customColour){
+  // Matches SelectMapBrush: any CustomColourName resolves through the profile's
+  // Custom colours before the map-type colour is considered
   if(!colours) return'#888';
   if(customColour){
-    let cc=customColour.toLowerCase();
-    if(cc==='release'&&colours.Release) return rgb(colours.Release);
-    if(cc==='crossing'&&colours.Crossing) return rgb(colours.Crossing);
+    let cc=findCustomColour(customColour);
+    if(cc) return rgb(cc);
+    let lc=customColour.toLowerCase();
+    if(lc==='release'&&colours.Release) return rgb(colours.Release);
+    if(lc==='crossing'&&colours.Crossing) return rgb(colours.Crossing);
   }
   let t=(type||'').toLowerCase();
   if(t.includes('rwy')) return rgb(colours.Runway);
@@ -182,6 +257,42 @@ function catColour(cat){
    Layer key
    ============================================================ */
 function layerKey(folder,name){return folder?(folder+'/'+name):name;}
+
+/* ============================================================
+   Line patterns — exact vatSys StrokeStyles (dash arrays are in
+   multiples of the stroke width, as Direct2D custom dashes are):
+   Broken = {12,6,2,6}, Dashed = {8,8}, Hash = {4,4},
+   Dotted = D2D Dot (a dot every 2 x width).
+   ============================================================ */
+function lineDash(pat,w){
+  if(pat==='broken') return [12*w,6*w,2*w,6*w];
+  if(pat==='dashed') return [8*w,8*w];
+  if(pat==='hash') return [4*w,4*w];
+  if(pat==='dotted') return [1,Math.max(0.5,2*w-1)];
+  return null;
+}
+// vatSys draws each polyline segment with its own DrawLine, so the
+// dash phase restarts at every vertex — replicate that here.
+function strokePolyline(pts,w,dash){
+  ctx.lineWidth=w;
+  if(!dash){
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    let p0=latLonToCanvas(pts[0][0],pts[0][1]);
+    ctx.moveTo(p0[0],p0[1]);
+    for(let i=1;i<pts.length;i++){let p=latLonToCanvas(pts[i][0],pts[i][1]);ctx.lineTo(p[0],p[1]);}
+    ctx.stroke();
+    return;
+  }
+  ctx.setLineDash(dash);
+  let prev=latLonToCanvas(pts[0][0],pts[0][1]);
+  for(let i=1;i<pts.length;i++){
+    let p=latLonToCanvas(pts[i][0],pts[i][1]);
+    ctx.beginPath();ctx.moveTo(prev[0],prev[1]);ctx.lineTo(p[0],p[1]);ctx.stroke();
+    prev=p;
+  }
+  ctx.setLineDash([]);
+}
 
 /* ============================================================
    Rendering
@@ -207,10 +318,12 @@ function render(){
     let layer=ls.layer;
     let col=typeColour(layer.Type,layer.CustomColour);
 
-    // Infills
-    ctx.fillStyle=col;
+    // Infills — Type=""Background"" infills paint in GroundBackground; everything
+    // else (including Type=""None"") fills with the map's colour (vatSys PaintMap)
     for(let inf of layer.Infills){
       if(inf.Points.length<3) continue;
+      let it=(inf.InfillType||'').toLowerCase();
+      ctx.fillStyle=it==='background'?(colours?rgb(colours.Background):'rgb(105,105,105)'):col;
       ctx.beginPath();
       let p0=latLonToCanvas(inf.Points[0][0],inf.Points[0][1]);
       ctx.moveTo(p0[0],p0[1]);
@@ -218,20 +331,20 @@ function render(){
       ctx.closePath();ctx.fill();
     }
 
-    // Lines
-    ctx.strokeStyle=col;ctx.lineWidth=1;ctx.lineJoin='round';ctx.lineCap='round';
+    // Lines — per-line Width and Pattern; flat caps like vatSys's aliased map lines
+    ctx.strokeStyle=col;ctx.lineJoin='round';ctx.lineCap='butt';
     for(let ln of layer.Lines){
       if(ln.Points.length<2) continue;
-      ctx.beginPath();
-      let p0=latLonToCanvas(ln.Points[0][0],ln.Points[0][1]);
-      ctx.moveTo(p0[0],p0[1]);
-      for(let i=1;i<ln.Points.length;i++){let p=latLonToCanvas(ln.Points[i][0],ln.Points[i][1]);ctx.lineTo(p[0],p[1]);}
-      ctx.stroke();
+      let pat=(ln.Pattern||'').toLowerCase();
+      if(pat==='none') continue;
+      let w=ln.Width||1;
+      strokePolyline(ln.Points,w,lineDash(pat,w));
     }
+    ctx.lineWidth=1;
 
-    // Map labels - eurofont_xsml = 16px Terminus bold
-    ctx.fillStyle=colours?rgb(colours.Other):'rgb(150,150,150)';
-    ctx.font=""bold 16px 'Terminus','Consolas',monospace"";
+    // Map labels — drawn with the map's own brush in vatSys, ASDMapFont
+    ctx.fillStyle=col;
+    ctx.font='bold '+mapFontSize+""px 'Terminus','Consolas',monospace"";
     ctx.textAlign='center';ctx.textBaseline='middle';
     for(let lb of layer.Labels){let p=latLonToCanvas(lb.Lat,lb.Lon);ctx.fillText(lb.Text,p[0],p[1]);}
   }
@@ -275,51 +388,75 @@ function getLabelOrientation(tx,ty,mx,my){
   return[dir,len];
 }
 
+const RT_PRI=1,RT_MODEC=2,RT_MODES=4,RT_ADSB=8,RT_SMR=16,RT_SMRADSB=32;
+const RT_SSR_ANY=RT_MODEC|RT_MODES|RT_ADSB|RT_SMRADSB;
+function wakeSymbolName(w){
+  switch((w||'').toUpperCase()){
+    case'L':return'GroundLight';
+    case'M':return'GroundMedium';
+    case'H':return'GroundHeavy';
+    case'J':return'GroundSuper';
+    default:return'Ground';
+  }
+}
+
+/* Label item text — exact vatSys PaintLabel formats */
+// ACID: FDR callsign when coupled; uncoupled ADS-B sources broadcast the
+// callsign, SSR-only uncoupled tracks show the squawk (4-digit octal)
+function acidText(ac){
+  if(ac.Coupled) return ac.Callsign||'';
+  let flags=ac.RadarFlags||0;
+  if(flags&(RT_ADSB|RT_SMRADSB)) return ac.Callsign||'';
+  if((flags&(RT_MODEC|RT_MODES))&&ac.Ssr!=null&&ac.Ssr>=0)
+    return ac.Ssr.toString(8).padStart(4,'0');
+  return ac.Callsign||'';
+}
+// LEVEL: CorrectedAltitude/100 as D3 (integer truncation, like C#)
+function levelText(alt){
+  return alt!=null&&alt>=0?String(Math.trunc(alt/100)).padStart(3,'0'):'';
+}
+// GROUNDSPEED: '++' outside 0..995, else round(gs/10) 2-padded
+function gsText(gs){
+  if(gs==null) return'';
+  return (gs>995||gs<0)?'++':String(Math.round(gs/10)).padStart(2,'0');
+}
+
 function drawAircraft(ac){
   let p=latLonToCanvas(ac.Lat,ac.Lon);
   let col=catColour(ac.Category);
+  let flags=ac.RadarFlags||0;
+  let ssr=ac.Ssr!=null?ac.Ssr:-1;
 
-  // History trail dots (2px radius filled circles)
+  // History trail: HistoryMarker symbol at past positions
   if(ac.History&&ac.History.length>0){
-    ctx.fillStyle=col;
     for(let h of ac.History){
       let hp=latLonToCanvas(h[0],h[1]);
-      ctx.beginPath();ctx.arc(hp[0],hp[1],2,0,Math.PI*2);ctx.fill();
+      drawSymbol('HistoryMarker',-1,hp[0],hp[1],null,col);
     }
   }
 
-  let hdgRad=(ac.Hdg+rotation+magVar)*Math.PI/180;
-
-  if(ac.OnGround){
-    // Ground symbol: wake-category diamond
-    // Ground (StrokeWidth=1): outline only. GroundLight/Medium/Heavy/Super (StrokeWidth=0): filled.
-    let sym=wakeSymbol(ac.WakeCat);
-    ctx.save();
-    ctx.translate(p[0],p[1]);
-    ctx.rotate(hdgRad);
-    let pts=sym.pts;
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0],pts[0][1]);
-    for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
-    ctx.closePath();
-    if(sym.sw>0){ctx.strokeStyle=col;ctx.lineWidth=sym.sw;ctx.stroke();}
-    else{ctx.fillStyle=col;ctx.fill();}
-    ctx.restore();
+  // Symbol + label selection — exact port of vatSys PaintGroundTracks
+  let hasLabel;
+  if(!ac.OnGround){
+    // Airborne: PSR/SMR paints the Primary cross; any SSR/ADSB source paints ModeS
+    if(flags&(RT_PRI|RT_SMR)) drawSymbol('Primary',-1,p[0],p[1],ac.Hdg,col);
+    hasLabel=!!(flags&RT_SSR_ANY);
+    if(hasLabel) drawSymbol('ModeS',ssr,p[0],p[1],ac.Hdg,col);
+  }else if(ac.Coupled||(flags&RT_SSR_ANY)){
+    // Ground: wake-category symbol rotated to the aircraft heading
+    drawSymbol(wakeSymbolName(ac.WakeCat),ssr,p[0],p[1],ac.Hdg,col);
+    hasLabel=true;
   }else{
-    // Airborne symbol: ModeS circle (6.5px radius)
-    ctx.beginPath();ctx.arc(p[0],p[1],6.5,0,Math.PI*2);
-    ctx.strokeStyle=col;ctx.lineWidth=1;ctx.stroke();
+    // Primary-only ground return: default Ground symbol, no label
+    drawSymbol('Ground',ssr,p[0],p[1],ac.Hdg,col);
+    hasLabel=false;
   }
 
-  // White circle selection indicator when label is being moved
+  // Selection octagon on the track being label-moved (vatSys Selection symbol)
   let cs=ac.Callsign||'';
-  if(labelMovingCS===cs){
-    ctx.beginPath();ctx.arc(p[0],p[1],14,0,Math.PI*2);
-    ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
-  }
+  if(labelMovingCS===cs) drawSymbol('Selection',-1,p[0],p[1],null,col);
 
-  // Unknown/orange tracks: no leader line or label in vatSys ground map
-  if(ac.Category!=='departure'&&ac.Category!=='arrival'&&ac.Category!=='local'&&ac.OnGround) return;
+  if(!hasLabel) return;
 
   // Per-track label direction and length
   let ldir=getLabelDir(cs);
@@ -339,32 +476,32 @@ function drawAircraft(ac){
   ctx.strokeStyle=col;ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(lx,ly);ctx.stroke();
 
-  // Label - eurofont_sml = 18px Terminus bold (ASDMainFont default)
+  // Label - ASDMainFont (default eurofont_sml = 18px Terminus bold)
   ctx.fillStyle=col;
-  ctx.font=""bold 18px 'Terminus','Consolas',monospace"";
-  let fontH=18;
+  ctx.font='bold '+labelFontSize+""px 'Terminus','Consolas',monospace"";
+  let fontH=labelFontSize;
   let isWest=ldir>4&&ldir<12;
   ctx.textAlign=isWest?'right':'left';
   ctx.textBaseline='top';
   let labelY=ly;
 
   // Label lines per Labels.xml exact definitions from Australia profile
+  // vatSys label type selection: GroundDeparture/GroundArrival only for on-ground
+  // dep/arr tracks; other coupled tracks (airborne or local) get GroundAir;
+  // uncoupled SSR/ADSB tracks get GroundLimited (callsign only).
   let lines=[];
-  if(!ac.OnGround){
+  if(!ac.Coupled){
+    // GroundLimited: ACID only (squawk for SSR-only uncoupled tracks)
+    let a=acidText(ac);
+    if(a) lines.push(a);
+  }else if(!ac.OnGround||ac.Category==='local'){
     // GroundAir: Line1=RWY / Line2=ACID / Line3=ATYPE WakeCat / Line4=LEVEL GS
     if(ac.Runway) lines.push(ac.Runway);
     if(ac.Callsign) lines.push(ac.Callsign);
     if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
-    // Line 4: LEVEL (alt/100 as 3-digit) + GROUNDSPEED (gs/10 as NN.)
-    let line4='';
-    if(ac.Alt!=null&&ac.Alt>=0){
-      line4=String(Math.round(ac.Alt/100)).padStart(3,'0');
-    }
-    if(ac.Gs>=0&&ac.Gs<=995){
-      line4+=(line4?' ':'')+String(Math.round(ac.Gs/10)).padStart(2,'0');
-    }else if(ac.Gs>995){
-      line4+=(line4?' ':'')+'++';
-    }
+    let line4=levelText(ac.Alt);
+    let g=gsText(ac.Gs);
+    if(g) line4+=(line4?' ':'')+g;
     if(line4) lines.push(line4);
   }else if(ac.Category==='departure'){
     // GroundDeparture: Line1=RWY / Line2=ACID / Line3=ATYPE WakeCat
@@ -372,8 +509,7 @@ function drawAircraft(ac){
     if(ac.Callsign) lines.push(ac.Callsign);
     if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
   }else if(ac.Category==='arrival'){
-    // GroundArrival: Line1=Bay / Line2=ACID / Line3=ATYPE WakeCat
-    if(ac.Bay) lines.push(ac.Bay);
+    // GroundArrival: Line1=Bay (OzStrips plugin, unavailable) / Line2=ACID / Line3=ATYPE WakeCat
     if(ac.Callsign) lines.push(ac.Callsign);
     if(ac.AircraftType){let t=ac.AircraftType;if(ac.WakeCat)t+=' '+ac.WakeCat;lines.push(t);}
   }
@@ -778,6 +914,15 @@ function loadGroundMaps(){
   }).catch(()=>{});
 }
 
+function loadSymbols(){
+  api('/api/symbols').then(data=>{
+    if(data.Symbols&&data.Symbols.length>0) buildSymTable(data.Symbols);
+    if(data.LabelFontSize) labelFontSize=data.LabelFontSize;
+    if(data.MapFontSize) mapFontSize=data.MapFontSize;
+    scheduleRender();
+  }).catch(()=>{});
+}
+
 function startAircraftPolling(icao){
   if(acTimer){clearInterval(acTimer);acTimer=null;}
   function poll(){
@@ -819,6 +964,7 @@ function startAircraftPolling(icao){
 resize();
 loadPositions();
 loadGroundMaps();
+loadSymbols();
 </script>
 </body>
 </html>";

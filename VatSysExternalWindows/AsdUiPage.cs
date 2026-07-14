@@ -76,6 +76,98 @@ let panX=0,panY=0;
 let layerState={};
 let aircraft=[];
 let acTimer=null;
+let labelFontSize=18,mapFontSize=16;
+let flashOn=true,flashTimer=null;
+let transAlt=10000;
+let dynamicLayers=[];
+
+/* ============================================================
+   Track symbols — served from the profile's Tracks.xml via
+   /api/symbols, rendered exactly like vatSys geometry
+   realisations: StrokeWidth 0 → filled (Filled figures only),
+   otherwise stroked outline of that width. SpecialCode
+   variants keyed by squawk code.
+   ============================================================ */
+let symTable={};
+function symKey(t,c){return t+'|'+c;}
+function buildSymTable(defs){
+  symTable={};
+  for(let d of defs) symTable[symKey(d.Type,d.SpecialCode)]=d;
+}
+// Fallback: Australia profile defaults, used until /api/symbols loads
+buildSymTable([
+ {Type:'Primary',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[-6,0],Filled:false,Closed:false,Segs:[{T:'l',P:[6,0]}]},
+   {Start:[0,6],Filled:false,Closed:false,Segs:[{T:'l',P:[0,-6]}]}]}]},
+ {Type:'ModeA',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:6.5,RadiusY:6.5}]},
+ {Type:'ModeS',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:6.5,RadiusY:6.5}]},
+ {Type:'ADSB',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[0,-4],Filled:false,Closed:true,Segs:[
+     {T:'b',B:[[0,-4],[12,-12],[4,0]]},{T:'b',B:[[4,0],[12,12],[0,4]]},
+     {T:'b',B:[[0,4],[-12,12],[-4,0]]},{T:'b',B:[[-4,0],[-12,-12],[0,-4]]}]}]}]},
+ {Type:'CoastRadar',SpecialCode:-1,StrokeWidth:3,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[-3,0],Filled:false,Closed:false,Segs:[{T:'l',P:[-7,0]}]},
+   {Start:[0,-3],Filled:false,Closed:false,Segs:[{T:'l',P:[0,-7]}]},
+   {Start:[3,0],Filled:false,Closed:false,Segs:[{T:'l',P:[7,0]}]},
+   {Start:[0,3],Filled:false,Closed:false,Segs:[{T:'l',P:[0,7]}]}]}]},
+ {Type:'CoastADSB',SpecialCode:-1,StrokeWidth:3,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[-3,-3],Filled:false,Closed:false,Segs:[{T:'l',P:[-7,-7]}]},
+   {Start:[3,-3],Filled:false,Closed:false,Segs:[{T:'l',P:[7,-7]}]},
+   {Start:[3,3],Filled:false,Closed:false,Segs:[{T:'l',P:[7,7]}]},
+   {Start:[-3,3],Filled:false,Closed:false,Segs:[{T:'l',P:[-7,7]}]}]}]},
+ {Type:'Cancelled',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:3,RadiusY:3}]},
+ {Type:'HistoryMarker',SpecialCode:-1,StrokeWidth:0,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:2,RadiusY:2}]},
+ {Type:'VelocityMarker',SpecialCode:-1,StrokeWidth:0,Rotate:false,Shapes:[{Kind:'ellipse',Center:[0,0],RadiusX:2,RadiusY:2}]},
+ {Type:'Selection',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'path',Figures:[
+   {Start:[11,-5],Filled:false,Closed:true,Segs:[{T:'l',P:[5,-11]},{T:'l',P:[-5,-11]},{T:'l',P:[-11,-5]},{T:'l',P:[-11,5]},{T:'l',P:[-5,11]},{T:'l',P:[5,11]},{T:'l',P:[11,5]}]}]}]}
+]);
+function getSymbol(type,ssr){
+  return symTable[symKey(type,ssr)]||symTable[symKey(type,-1)]||null;
+}
+function traceShape(sh,fillOnly){
+  if(sh.Kind==='ellipse'){
+    ctx.beginPath();
+    ctx.ellipse(sh.Center?sh.Center[0]:0,sh.Center?sh.Center[1]:0,sh.RadiusX,sh.RadiusY,0,0,Math.PI*2);
+    return true;
+  }
+  if(sh.Kind==='rect'){
+    let tl=sh.TopLeft||[0,0],br=sh.BottomRight||[0,0];
+    ctx.beginPath();
+    ctx.rect(tl[0],tl[1],br[0]-tl[0],br[1]-tl[1]);
+    return true;
+  }
+  if(sh.Kind==='path'&&sh.Figures){
+    ctx.beginPath();
+    let traced=false;
+    for(let f of sh.Figures){
+      if(fillOnly&&!f.Filled) continue; // Hollow figures excluded from fills (D2D FigureBegin)
+      ctx.moveTo(f.Start[0],f.Start[1]);
+      for(let s of f.Segs){
+        if(s.T==='b'&&s.B) ctx.bezierCurveTo(s.B[0][0],s.B[0][1],s.B[1][0],s.B[1][1],s.B[2][0],s.B[2][1]);
+        else if(s.P) ctx.lineTo(s.P[0],s.P[1]);
+      }
+      if(f.Closed) ctx.closePath();
+      traced=true;
+    }
+    return traced;
+  }
+  return false;
+}
+function drawSymbol(type,ssr,x,y,headingDeg,col){
+  let def=getSymbol(type,ssr);
+  if(!def) return;
+  ctx.save();
+  ctx.translate(x,y);
+  if(def.Rotate&&headingDeg!=null&&headingDeg!==-1)
+    ctx.rotate(headingDeg*Math.PI/180);
+  let filled=def.StrokeWidth===0;
+  for(let sh of def.Shapes){
+    if(!traceShape(sh,filled)) continue;
+    if(filled){ctx.fillStyle=col;ctx.fill();}
+    else{ctx.strokeStyle=col;ctx.lineWidth=def.StrokeWidth;ctx.stroke();}
+  }
+  ctx.restore();
+}
 
 /* ============================================================
    Coordinate conversion (no rotation for ASD)
@@ -85,7 +177,8 @@ function nmToDegLon(lat){return 1/(60*Math.cos(lat*Math.PI/180));}
 function latLonToCanvas(lat,lon){
   let dlat=lat-centerLat,dlon=lon-centerLon;
   let xNm=dlon/nmToDegLon(centerLat),yNm=dlat/NM_TO_DEG_LAT;
-  let scale=Math.min(W,H)/(nmRange*2);
+  // vatSys SetZoom: DefaultRange spans the full window WIDTH in NM
+  let scale=W/nmRange;
   return[W/2+panX+xNm*scale,H/2+panY-yNm*scale];
 }
 
@@ -116,24 +209,41 @@ function applyTheme(){
     '.dd-item:hover{background:'+depCol+';}';
 }
 
-function mapTypeColour(type){
+function findCustomColour(name){
+  if(!colours||!colours.CustomColours) return null;
+  if(colours.CustomColours[name]) return colours.CustomColours[name];
+  let lower=name.toLowerCase();
+  for(let k in colours.CustomColours) if(k.toLowerCase()===lower) return colours.CustomColours[k];
+  return null;
+}
+function mapTypeColour(type,customColour){
+  // Matches ASDControlDX.SelectMapBrush: any CustomColourName resolves through the
+  // profile's Custom colours first; then System→PrimaryMap, System2/Flex→SecondaryMap,
+  // Filled→Infill, Local/Global_Private→UserMap, Supervisor/TDA/REST_NTZ_DAIW→PRDArea
   if(!colours) return'#888';
+  if(customColour){
+    let cc=findCustomColour(customColour);
+    if(cc) return rgb(cc);
+  }
   let t=(type||'').toLowerCase();
   if(t==='system') return rgb(colours.PrimaryMap);
-  if(t==='system2') return rgb(colours.SecondaryMap);
+  if(t==='system2'||t==='flex') return rgb(colours.SecondaryMap);
   if(t==='filled') return rgb(colours.Infill);
-  if(t==='flex') return rgb(colours.SecondaryMap);
+  if(t==='local_private'||t==='global_private') return rgb(colours.UserMap||colours.PrimaryMap);
+  if(t==='supervisor'||t==='tda'||t==='rest_ntz_daiw') return rgb(colours.PRDArea||colours.PrimaryMap);
   return rgb(colours.PrimaryMap);
 }
 
 function trackColour(ac){
+  // Matches ASDControlDX.SelectASDBrush HMI state switch (note: Preactive
+  // tracks paint in the NonJurisdiction colour on the ASD)
   if(!colours) return'rgb(0,0,0)';
   let st=(ac.State||'').toLowerCase();
   if(st==='jurisdiction') return rgb(colours.Jurisdiction);
+  if(st==='ghostjurisdiction') return rgb(colours.GhostJurisdiction||colours.Jurisdiction);
   if(st==='announced') return rgb(colours.Announced);
-  if(st==='preactive') return rgb(colours.Preactive);
   if(st==='handoverin'||st==='handoverout') return rgb(colours.Handover);
-  if(st==='postjurisdiction') return rgb(colours.Jurisdiction);
+  if(st==='postjurisdiction') return rgb(colours.PostJurisdiction||colours.Jurisdiction);
   return rgb(colours.NonJurisdiction);
 }
 
@@ -141,6 +251,54 @@ function trackColour(ac){
    Layer key
    ============================================================ */
 function layerKey(folder,name){return folder?(folder+'/'+name):name;}
+
+/* ============================================================
+   Line patterns — exact vatSys StrokeStyles (dash arrays are in
+   multiples of the stroke width, as Direct2D custom dashes are):
+   Broken = {12,6,2,6}, Dashed = {8,8}, Hash = {4,4},
+   Dotted = D2D Dot (a dot every 2 x width).
+   ============================================================ */
+function lineDash(pat,w){
+  if(pat==='broken') return [12*w,6*w,2*w,6*w];
+  if(pat==='dashed') return [8*w,8*w];
+  if(pat==='hash') return [4*w,4*w];
+  if(pat==='dotted') return [1,Math.max(0.5,2*w-1)];
+  return null;
+}
+// vatSys draws each polyline segment with its own DrawLine, so the
+// dash phase restarts at every vertex — replicate that here.
+function strokePolyline(pts,w,dash){
+  ctx.lineWidth=w;
+  if(!dash){
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    let p0=latLonToCanvas(pts[0][0],pts[0][1]);
+    ctx.moveTo(p0[0],p0[1]);
+    for(let i=1;i<pts.length;i++){let p=latLonToCanvas(pts[i][0],pts[i][1]);ctx.lineTo(p[0],p[1]);}
+    ctx.stroke();
+    return;
+  }
+  ctx.setLineDash(dash);
+  let prev=latLonToCanvas(pts[0][0],pts[0][1]);
+  for(let i=1;i<pts.length;i++){
+    let p=latLonToCanvas(pts[i][0],pts[i][1]);
+    ctx.beginPath();ctx.moveTo(prev[0],prev[1]);ctx.lineTo(p[0],p[1]);ctx.stroke();
+    prev=p;
+  }
+  ctx.setLineDash([]);
+}
+
+// vatSys fills non-solid-pattern infills with an 8x8 checkerboard of
+// Infill colour on ASDBackground (infillBrokenBrush bitmap)
+let hatchPattern=null;
+function buildHatch(){
+  if(!colours) return;
+  let c=document.createElement('canvas');c.width=8;c.height=8;
+  let g=c.getContext('2d');
+  g.fillStyle=rgb(colours.Background);g.fillRect(0,0,8,8);
+  g.fillStyle=rgb(colours.Infill);g.fillRect(0,0,4,4);g.fillRect(4,4,4,4);
+  hatchPattern=ctx.createPattern(c,'repeat');
+}
 
 /* ============================================================
    Rendering
@@ -161,15 +319,29 @@ function render(){
   }
   visibleLayers.sort((a,b)=>(b.layer.Priority||0)-(a.layer.Priority||0));
 
-  for(let ls of visibleLayers){
-    let layer=ls.layer;
-    let col=mapTypeColour(layer.Type);
+  // Controlled-sector infill ('Dynamic Infill') paints beneath the file maps;
+  // active restricted areas (yellow PRD outlines + hatched infills) paint on top
+  for(let dl of dynamicLayers) if(dl.Name==='Dynamic Infill') drawMapLayer(dl);
+  for(let ls of visibleLayers) drawMapLayer(ls.layer);
+  for(let dl of dynamicLayers) if(dl.Name!=='Dynamic Infill') drawMapLayer(dl);
 
-    // Infills
+  for(let ac of aircraft) drawAircraft(ac);
+}
+
+function drawMapLayer(layer){
+    let col=mapTypeColour(layer.Type,layer.CustomColour);
+
+    // Infills — Type=""Background"" paints in ASDBackground; non-solid patterns
+    // fill with the Infill/Background checkerboard; everything else (including
+    // Type=""None"") fills with the map's own colour (vatSys PaintMap)
     if(layer.Infills&&layer.Infills.length>0){
-      ctx.fillStyle=colours?rgb(colours.Infill):'#888';
       for(let inf of layer.Infills){
         if(inf.Points.length<3) continue;
+        let it=(inf.InfillType||'').toLowerCase();
+        let ip=(inf.Pattern||'').toLowerCase();
+        if(it==='background') ctx.fillStyle=colours?rgb(colours.Background):'rgb(127,127,127)';
+        else if(hatchPattern&&(ip==='broken'||ip==='hash'||ip==='dashed'||ip==='dotted')) ctx.fillStyle=hatchPattern;
+        else ctx.fillStyle=col;
         ctx.beginPath();
         let p0=latLonToCanvas(inf.Points[0][0],inf.Points[0][1]);
         ctx.moveTo(p0[0],p0[1]);
@@ -178,29 +350,30 @@ function render(){
       }
     }
 
-    // Lines
-    ctx.strokeStyle=col;ctx.lineJoin='round';ctx.lineCap='round';
+    // Lines — flat caps like vatSys's aliased map lines. Dashed lines on
+    // System maps replicate the two-tone bitmap brush: 8px PrimaryMap
+    // alternating with 8px ASDBackground (the gaps paint opaquely).
+    ctx.strokeStyle=col;ctx.lineJoin='round';ctx.lineCap='butt';
+    let isSystem=(layer.Type||'').toLowerCase()==='system';
     for(let ln of layer.Lines){
       if(ln.Points.length<2) continue;
       let pat=(ln.Pattern||'').toLowerCase();
       if(pat==='none') continue;
-      ctx.lineWidth=ln.Width||1;
-      if(pat==='broken') ctx.setLineDash([12,6,2,6]);
-      else if(pat==='dashed') ctx.setLineDash([8,8]);
-      else if(pat==='hash') ctx.setLineDash([4,4]);
-      else if(pat==='dotted') ctx.setLineDash([2,2]);
-      else ctx.setLineDash([]);
-      ctx.beginPath();
-      let p0=latLonToCanvas(ln.Points[0][0],ln.Points[0][1]);
-      ctx.moveTo(p0[0],p0[1]);
-      for(let i=1;i<ln.Points.length;i++){let p=latLonToCanvas(ln.Points[i][0],ln.Points[i][1]);ctx.lineTo(p[0],p[1]);}
-      ctx.stroke();
+      let w=ln.Width||1;
+      if(pat==='dashed'&&isSystem){
+        ctx.strokeStyle=colours?rgb(colours.Background):'rgb(127,127,127)';
+        strokePolyline(ln.Points,w,null);
+        ctx.strokeStyle=col;
+        strokePolyline(ln.Points,w,[8,8]);
+        continue;
+      }
+      strokePolyline(ln.Points,w,lineDash(pat,w));
     }
-    ctx.setLineDash([]);ctx.lineWidth=1;
+    ctx.lineWidth=1;
 
-    // Map labels
+    // Map labels — map's own colour, ASDMapFont
     ctx.fillStyle=col;
-    ctx.font=""bold 16px 'Terminus','Consolas',monospace"";
+    ctx.font='bold '+mapFontSize+""px 'Terminus','Consolas',monospace"";
     ctx.textAlign='center';ctx.textBaseline='middle';
     for(let lb of layer.Labels){let p=latLonToCanvas(lb.Lat,lb.Lon);ctx.fillText(lb.Text,p[0],p[1]);}
 
@@ -222,9 +395,6 @@ function render(){
         }
       }
     }
-  }
-
-  for(let ac of aircraft) drawAircraft(ac);
 }
 
 /* ============================================================
@@ -255,57 +425,120 @@ function getLabelOrientation(tx,ty,mx,my){
   return[dir,len];
 }
 
+const RT_PRI=1,RT_MODEC=2,RT_MODES=4,RT_ADSB=8,RT_SMRADSB=32;
+
+/* Label item text — exact vatSys PaintLabel formats */
+// ACID: FDR callsign when coupled; uncoupled ADS-B sources broadcast the
+// callsign, SSR-only uncoupled tracks show the squawk (4-digit octal)
+function acidText(ac){
+  if(ac.Coupled) return ac.Callsign||'';
+  let flags=ac.RadarFlags||0;
+  if(flags&(RT_ADSB|RT_SMRADSB)) return ac.Callsign||'';
+  if((flags&(RT_MODEC|RT_MODES))&&ac.Ssr!=null&&ac.Ssr>=0)
+    return ac.Ssr.toString(8).padStart(4,'0');
+  return ac.Callsign||'';
+}
+// LEVEL: CorrectedAltitude/100 as D3 (integer truncation, like C#)
+function levelText(alt){
+  return alt!=null&&alt>=0?String(Math.trunc(alt/100)).padStart(3,'0'):'';
+}
+// GROUNDSPEED: '++' outside 0..995, else round(gs/10) 2-padded
+function gsText(gs){
+  if(gs==null) return'';
+  return (gs>995||gs<0)?'++':String(Math.round(gs/10)).padStart(2,'0');
+}
+
 function drawAircraft(ac){
   let p=latLonToCanvas(ac.Lat,ac.Lon);
   let col=trackColour(ac);
+  let flags=ac.RadarFlags||0;
+  let ssr=ac.Ssr!=null?ac.Ssr:-1;
 
-  // History trail dots
+  // History trail: HistoryMarker symbol at past positions
   if(ac.History&&ac.History.length>0){
-    ctx.fillStyle=col;
     for(let h of ac.History){
       let hp=latLonToCanvas(h[0],h[1]);
-      ctx.beginPath();ctx.arc(hp[0],hp[1],2,0,Math.PI*2);ctx.fill();
+      drawSymbol('HistoryMarker',-1,hp[0],hp[1],null,col);
     }
   }
 
-  // Velocity vector
-  if(vvMinutes>0&&ac.Gs>0){
+  // Velocity vector — exact PaintASDTrack algorithm: segments of min(5,VV)
+  // minutes along the track heading, VelocityMarker at intermediate points
+  if(vvMinutes>0&&ac.Gs>0&&ac.Hdg!==-1){
+    let segMin=Math.min(5,vvMinutes);
+    let segNm=ac.Gs/60*segMin;
     let hdgRad=ac.Hdg*Math.PI/180;
     let cosH=Math.cos(hdgRad),sinH=Math.sin(hdgRad);
-    let cosLat=Math.cos(ac.Lat*Math.PI/180);
-    let totalNm=ac.Gs/60*vvMinutes;
-    let endLat=ac.Lat+cosH*totalNm/60;
-    let endLon=ac.Lon+sinH*totalNm/60/cosLat;
-    let ep=latLonToCanvas(endLat,endLon);
+    let prevLat=ac.Lat,prevLon=ac.Lon,prev=p;
     ctx.strokeStyle=col;ctx.lineWidth=1;
-    ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(ep[0],ep[1]);ctx.stroke();
-    // Minute markers
-    let segMin=vvMinutes<=5?1:5;
-    for(let m=segMin;m<vvMinutes;m+=segMin){
-      let segNm=ac.Gs/60*m;
-      let mLat=ac.Lat+cosH*segNm/60;
-      let mLon=ac.Lon+sinH*segNm/60/cosLat;
-      let mp=latLonToCanvas(mLat,mLon);
-      ctx.fillStyle=col;
-      ctx.beginPath();ctx.arc(mp[0],mp[1],1.5,0,Math.PI*2);ctx.fill();
+    for(let m=segMin;m<=vvMinutes;m+=segMin){
+      let nLat=prevLat+cosH*segNm/60;
+      let nLon=prevLon+sinH*segNm/(60*Math.cos(prevLat*Math.PI/180));
+      let np=latLonToCanvas(nLat,nLon);
+      ctx.beginPath();ctx.moveTo(prev[0],prev[1]);ctx.lineTo(np[0],np[1]);ctx.stroke();
+      if(m<vvMinutes) drawSymbol('VelocityMarker',-1,np[0],np[1],null,col);
+      prevLat=nLat;prevLon=nLon;prev=np;
     }
   }
 
-  // Symbol: hollow triangle (fixed orientation, not rotated for air tracks)
-  ctx.strokeStyle=col;ctx.lineWidth=1;
-  ctx.beginPath();
-  ctx.moveTo(p[0],p[1]-4);ctx.lineTo(p[0]+4,p[1]+3);ctx.lineTo(p[0]-4,p[1]+3);ctx.closePath();
-  ctx.stroke();
+  // Symbol selection — exact port of vatSys PaintASDTrack:
+  // ModeS(4) → ModeS, else ModeC(2) → ModeA, else ADSB(8) → ADSB.
+  // Coasting → CoastADSB/CoastRadar. Identing symbols blink in IdentFlash.
+  // A PRI return overlays the Primary cross on the SSR symbol.
+  let ssrSym=null;
+  if(flags&RT_MODES) ssrSym='ModeS';
+  else if(flags&RT_MODEC) ssrSym='ModeA';
+  else if(flags&RT_ADSB) ssrSym='ADSB';
 
-  // White circle selection indicator when label is being moved
-  let cs=ac.Callsign||'';
-  if(labelMovingCS===cs){
-    ctx.beginPath();ctx.arc(p[0],p[1],14,0,Math.PI*2);
-    ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+  if(ac.Coasting){
+    drawSymbol(ssrSym==='ADSB'?'CoastADSB':'CoastRadar',ssr,p[0],p[1],ac.Hdg,col);
+  }else if(ssrSym){
+    if(!ac.Ident||flashOn){
+      let symCol=ac.Ident?(colours&&colours.IdentFlash?rgb(colours.IdentFlash):'#fff'):col;
+      drawSymbol(ssrSym,ssr,p[0],p[1],ac.Hdg,symCol);
+      if(flags&RT_PRI) drawSymbol('Primary',ssr,p[0],p[1],ac.Hdg,symCol);
+    }
+  }else if(flags&RT_PRI){
+    drawSymbol('Primary',-1,p[0],p[1],ac.Hdg,col);
   }
 
-  // Skip label if no callsign
-  if(!cs) return;
+  // Selection octagon on the track being label-moved (vatSys Selection symbol)
+  let cs=ac.Callsign||'';
+  if(labelMovingCS===cs) drawSymbol('Selection',-1,p[0],p[1],null,col);
+
+  // Label content — vatSys label templates: coupled tracks get the Normal
+  // label (RWY / ACID WAKE / LEVEL VI CFL GS), uncoupled tracks get the
+  // Limited label (ACID / LEVEL as FLnnn above transition, 5-digit feet below)
+  let lines=[];
+  if(ac.Coupled){
+    if(ac.Runway) lines.push(ac.Runway);
+    let l2=ac.Callsign||'';
+    if(ac.WakeCat) l2+=(l2?' ':'')+ac.WakeCat;
+    if(l2) lines.push(l2);
+    let l3=levelText(ac.Alt);
+    // vertical indicator: vatSys Terminus glyphs (® climb / ¬ descend /
+    // '>' level, threshold 300fpm), suppressed while coasting
+    if(!ac.Coasting){
+      if(ac.VSpd>300) l3+='®';
+      else if(ac.VSpd<-300) l3+='¬';
+      else l3+='>';
+    }
+    // CFL: 3-digit, 'VSA' for the visual-approach sentinel (2), hidden when -1
+    if(ac.CFL!=null&&ac.CFL!==-1)
+      l3+=(ac.CFL===2?'VSA':String(Math.trunc(ac.CFL/100)).padStart(3,'0'));
+    let g=gsText(ac.Gs);
+    if(g) l3+=(l3?' ':'')+g;
+    if(l3) lines.push(l3);
+  }else{
+    let a=acidText(ac);
+    if(a) lines.push(a);
+    if(ac.Alt!=null&&ac.Alt>=0){
+      lines.push(ac.Alt>transAlt
+        ?'FL'+String(Math.trunc(ac.Alt/100)).padStart(3,'0')
+        :String(ac.Alt).padStart(5,'0'));
+    }
+  }
+  if(lines.length===0) return;
 
   let ldir=getLabelDir(cs);
   let llen=getLabelLen(cs);
@@ -323,41 +556,13 @@ function drawAircraft(ac){
   ctx.strokeStyle=col;ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(lx,ly);ctx.stroke();
 
-  // Label
+  // Label — ASDMainFont (default eurofont_sml = 18px Terminus bold)
   ctx.fillStyle=col;
-  ctx.font=""bold 18px 'Terminus','Consolas',monospace"";
-  let fontH=18;
+  ctx.font='bold '+labelFontSize+""px 'Terminus','Consolas',monospace"";
+  let fontH=labelFontSize;
   let isWest=ldir>4&&ldir<12;
   ctx.textAlign=isWest?'right':'left';
   ctx.textBaseline='top';
-
-  let lines=[];
-  lines.push(cs);
-
-  // Line 2: Level + vertical indicator + CFL
-  let line2='';
-  if(ac.Alt!=null&&ac.Alt>=0){
-    line2=String(Math.round(ac.Alt/100)).padStart(3,'0');
-  }
-  // Vertical indicator: >300fpm=climb, <-300fpm=descend, else level
-  if(line2){
-    if(ac.VSpd>300) line2+='\u2191';
-    else if(ac.VSpd<-300) line2+='\u2193';
-    else line2+='\u2192';
-  }
-  if(ac.CFL!=null&&ac.CFL>0){
-    line2+=String(Math.round(ac.CFL/100)).padStart(3,'0');
-  }
-  if(line2) lines.push(line2);
-
-  // Line 3: Ground speed
-  let line3='';
-  if(ac.Gs>=0&&ac.Gs<=995){
-    line3=String(Math.round(ac.Gs/10)).padStart(2,'0');
-  }else if(ac.Gs>995){
-    line3='++';
-  }
-  if(line3) lines.push(line3);
 
   for(let i=0;i<lines.length;i++) ctx.fillText(lines[i],lx,ly+i*fontH);
 }
@@ -731,7 +936,9 @@ function loadAsdMaps(){
     allAsdMaps=data.Maps||[];
     colours=data.Colours||null;
     vvMinutes=data.VelocityVectors||0;
+    if(data.TransitionAltitude) transAlt=data.TransitionAltitude;
     applyTheme();
+    buildHatch();
     for(let m of allAsdMaps){
       let key=layerKey(m.Folder,m.Name);
       if(!layerState[key]) layerState[key]={visible:false,layer:null};
@@ -740,12 +947,46 @@ function loadAsdMaps(){
   }).catch(()=>{});
 }
 
+function loadSymbols(){
+  api('/api/symbols').then(data=>{
+    if(data.Symbols&&data.Symbols.length>0) buildSymTable(data.Symbols);
+    if(data.LabelFontSize) labelFontSize=data.LabelFontSize;
+    if(data.MapFontSize) mapFontSize=data.MapFontSize;
+    scheduleRender();
+  }).catch(()=>{});
+}
+
+// Runtime dynamic maps: controlled-sector infill and active restricted areas
+// (yellow PRD outlines). These change as sectors are taken/released, so refresh
+// periodically.
+function loadDynamicMaps(){
+  api('/api/asd/dynamicmaps').then(data=>{
+    dynamicLayers=data||[];
+    scheduleRender();
+  }).catch(()=>{});
+}
+
+// Ident flash — vatSys blinks identing symbols on the render flash cycle
+function updateFlashTimer(){
+  let anyIdent=aircraft.some(a=>a.Ident);
+  if(anyIdent&&!flashTimer){
+    flashTimer=setInterval(()=>{flashOn=!flashOn;scheduleRender();},500);
+  }else if(!anyIdent&&flashTimer){
+    clearInterval(flashTimer);flashTimer=null;flashOn=true;
+  }
+}
+
 function startAircraftPolling(){
   if(acTimer){clearInterval(acTimer);acTimer=null;}
   function poll(){
-    let lat=centerLat,lon=centerLon,rng=nmRange;
-    api('/api/asd/aircraft?lat='+lat+'&lon='+lon+'&range='+Math.ceil(rng)).then(data=>{
-      aircraft=data||[];scheduleRender();
+    // Query around the actual view centre (pan offset included) with a range
+    // covering the whole viewport, so tracks never vanish when zooming/panning
+    let scale=W/nmRange;
+    let vLat=centerLat+(panY/scale)*NM_TO_DEG_LAT;
+    let vLon=centerLon-(panX/scale)*nmToDegLon(centerLat);
+    let rng=Math.ceil(nmRange*0.5*Math.max(1,H/W)*1.3)+5;
+    api('/api/asd/aircraft?lat='+vLat.toFixed(5)+'&lon='+vLon.toFixed(5)+'&range='+rng).then(data=>{
+      aircraft=data||[];updateFlashTimer();scheduleRender();
     }).catch(()=>{});
   }
   poll();
@@ -756,6 +997,9 @@ function startAircraftPolling(){
 resize();
 loadPositions();
 loadAsdMaps();
+loadSymbols();
+loadDynamicMaps();
+setInterval(loadDynamicMaps,5000);
 </script>
 </body>
 </html>";

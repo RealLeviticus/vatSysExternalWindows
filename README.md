@@ -25,28 +25,34 @@ The plugin starts a lightweight HTTP server on **port 5300** inside the vatSys p
 
 | Endpoint | Description |
 |---|---|
-| `GET /` | Serves the full HTML/CSS/JS web application |
+| `GET /` | Landing page for choosing a window type |
+| `GET /ground`, `GET /asd` | Ground / Air window web applications |
 | `GET /api/airports` | All ASMGCS positions with name, airport, group, center, range, rotation, magnetic variation, and map references |
 | `GET /api/groundmaps` | All Ground-category map metadata + colour scheme (for the Maps dropdown) |
+| `GET /api/symbols` | Track symbol geometry parsed from the profile's Tracks.xml (DefaultTracks.xml backfill) + current label/map font sizes |
 | `GET /api/maplayers?maps=Folder/Name,...` | Geometry (infills, lines, labels) for specific map layers |
 | `GET /api/map?icao=XXXX` | Full map data for an airport (legacy endpoint) |
-| `GET /api/aircraft?icao=XXXX` | Live aircraft near an airport with callsign, position, heading, groundspeed, wake category, type, runway, on-ground state, category, and position history |
+| `GET /api/aircraft?icao=XXXX` | Live aircraft near an airport with callsign, position, heading, groundspeed, radar flags, squawk, wake category, type, runway, on-ground state, category, and position history |
+| `GET /api/visiblemaps` | Crossing/Release map layers currently visible in the vatSys Ground window |
+| `GET /api/asd/positions`, `/api/asd/maps`, `/api/asd/maplayers`, `/api/asd/aircraft` | Air window equivalents |
 
 ### Rendering Details
 
 | Element | Specification |
 |---|---|
-| Ground symbols | Wake-category diamonds from Tracks.xml — L/M/H/J sizes, all filled, Ground default also stroked (1px) |
-| Airborne symbol | ModeS circle, 6.5px radius, stroked |
-| History dots | 2px radius filled circles at past positions (up to 10) |
-| Aircraft labels | 18px bold Terminus (`eurofont_sml` / `ASDMainFont`) |
-| Map labels | 16px bold Terminus (`eurofont_xsml` / `ASDMapFont`) |
-| Menu text | 16px bold Terminus (`eurofont_winsml`) |
-| Leader line | Direction=1 (22.5°), Length=1 (40px), screen-fixed |
-| Track colours | Departure / Arrival / Local / Unknown from Colours.xml |
-| Map colours | GroundBackground / Runway / Taxiway / Apron / Building / Other from Colours.xml |
+| Track symbols | Exact geometry from the profile's Tracks.xml (paths/ellipses/rects, per-squawk SpecialCode variants), served via `/api/symbols`. StrokeWidth 0 → filled, otherwise stroked outline — same as vatSys geometry realisations |
+| Ground symbol selection | Port of `PaintGroundTracks`: coupled or SSR/ADSB ground tracks get the wake-category symbol (L/M/H/J → GroundLight/Medium/Heavy/Super, else Ground); airborne tracks get Primary (PSR/SMR) and/or ModeS (any SSR source); primary-only ground returns get the Ground symbol with no label |
+| Air symbol selection | Port of `PaintASDTrack`: ModeS → ModeA → ADSB by radar flags, Coast crosshair/cross when coasting, Primary cross overlay on PSR returns, ident blink in IdentFlash colour |
+| Velocity vectors | Exact algorithm: segments of `min(5, VV)` minutes along track heading with VelocityMarker symbols at intermediate points |
+| History dots | HistoryMarker symbol at past positions, capped at `MMI.HistoryDots` |
+| Aircraft labels | `MMI.ASDMainFont` size (default 18px bold Terminus), Labels.xml formats: GroundAir / GroundDeparture / GroundArrival / GroundLimited (ground), Normal / Limited (air) |
+| Label item formats | Exact `PaintLabel` ports — ACID: FDR callsign, or squawk (4-digit octal) for SSR-only uncoupled tracks (ADS-B broadcasts callsign); LEVEL: alt/100 as D3; RWY: departure runway until ATD set, then arrival runway; vertical indicator: ® / ¬ / > Terminus glyphs at ±300fpm, hidden while coasting; CFL: D3 with VSA sentinel; GS: round(gs/10) 2-padded, ++ outside 0–995; Limited level: FLnnn above transition altitude, 5-digit feet below |
+| Map labels | `MMI.ASDMapFont` size (default 16px), drawn in the map layer's own colour |
+| Leader line | Direction × 22.5°, length × 35px + 5 (matches `Track.LABEL_LEN_UNIT` and `CalculateLabelLocation`) |
+| Track colours | Ground: Departure / Arrival / Local / Unknown; Air: HMI state via `MMI.FindTrack` → `Track.State` (Preactive renders NonJurisdiction, as vatSys does) |
+| Map colours | Port of `SelectMapBrush`: Ground_RWY/TWY/APR/BLD/INF + custom colours; ASD System/System2/Flex/Filled/UserMap/PRDArea. Infill `Type="Background"` paints the window background colour |
 | Layer priority | Descending sort — higher priority drawn first (behind lower priority) |
-| Coordinate rotation | `heading + position.Rotation + position.MagneticVariation` (clockwise from north) |
+| Coordinate rotation | Map: `position.Rotation + MagneticVariation`; ground symbols additionally rotate to `NetworkPilot.Heading` (airborne symbols are screen-fixed) |
 
 ## Build Requirements
 
@@ -95,9 +101,12 @@ Default output: `%UserProfile%\Documents\vatSys Files\Profiles\Australia\Plugins
 VatSysExternalWindows/
 ├── ExternalWindowsPlugin.cs   # IPlugin entry point, starts/stops the web server
 ├── EmbeddedWebServer.cs       # TCP HTTP server with JSON API routing
+├── ProfileLocator.cs          # Resolves the loaded profile directory (DatasetPath)
 ├── GroundDataService.cs       # Reads vatSys runtime data (positions, tracks, aircraft)
 ├── GroundMapData.cs           # Parses profile XML files (maps, colours, coordinates)
-├── WebUiPage.cs               # Complete HTML/CSS/JS web application as a C# string constant
+├── AsdDataService.cs          # ASD (air window) positions, maps, colours, aircraft
+├── LandingPage.cs             # Landing page for choosing a window type
+├── WebUiPage.cs               # Ground window HTML/CSS/JS app as a C# string constant
+├── AsdUiPage.cs               # Air window HTML/CSS/JS app as a C# string constant
 └── VatSysExternalWindows.csproj
 ```
-- High FPS and high JPEG quality increase CPU and network usage.

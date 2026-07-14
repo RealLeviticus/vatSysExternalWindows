@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using vatsys;
 
@@ -14,6 +15,9 @@ namespace VatSysExternalWindows;
 /// </summary>
 public sealed class AsdDataService
 {
+    // vatSys DisplayMaps.LoadMaps airway-route detection regex ("FIX.AIRWAY.FIX")
+    private static readonly Regex RouteRegex = new(@"^\w+(\s\w+)?[.]\w+[.]\w+(\s\w+)?$", RegexOptions.Compiled);
+
     private readonly object _lock = new();
     private string _profileDir = "";
     private string _profileName = "";
@@ -36,8 +40,12 @@ public sealed class AsdDataService
         public int[] Background { get; set; } = { 127, 127, 127 };
         public int[] PrimaryMap { get; set; } = { 90, 90, 90 };
         public int[] SecondaryMap { get; set; } = { 145, 178, 177 };
+        public int[] UserMap { get; set; } = { 100, 100, 100 };
+        public int[] PRDArea { get; set; } = { 100, 100, 100 };
         public int[] Infill { get; set; } = { 133, 133, 133 };
         public int[] Jurisdiction { get; set; } = { 200, 255, 200 };
+        public int[] GhostJurisdiction { get; set; } = { 200, 255, 200 };
+        public int[] PostJurisdiction { get; set; } = { 200, 255, 200 };
         public int[] NonJurisdiction { get; set; } = { 0, 0, 0 };
         public int[] NonJurisdictionLabel { get; set; } = { 55, 55, 55 };
         public int[] Announced { get; set; } = { 0, 0, 188 };
@@ -45,11 +53,15 @@ public sealed class AsdDataService
         public int[] Handover { get; set; } = { 255, 205, 105 };
         public int[] Emergency { get; set; } = { 209, 46, 46 };
         public int[] Warning { get; set; } = { 255, 255, 0 };
+        public int[] IdentFlash { get; set; } = { 255, 255, 255 };
         public int[] CFLHighlight { get; set; } = { 255, 255, 255 };
         public int[] StaticTools { get; set; } = { 255, 230, 180 };
         public int[] Route { get; set; } = { 196, 171, 196 };
         public int[] WindowBackground { get; set; } = { 160, 170, 170 };
         public int[] InteractiveText { get; set; } = { 0, 0, 96 };
+        /// <summary>All Custom colours from Colours.xml by name — vatSys resolves any
+        /// map CustomColourName via Colours.GetCustomColorDX.</summary>
+        public Dictionary<string, int[]> CustomColours { get; set; } = new();
     }
 
     public sealed class AsdMapMeta
@@ -93,6 +105,82 @@ public sealed class AsdDataService
         try { return MMI.VelocityVectors; } catch { return 0; }
     }
 
+    /// <summary>Transition altitude in feet — vatSys Limited labels show levels
+    /// above it as FLnnn and below it as 5-digit feet.</summary>
+    public int GetTransitionAltitude()
+    {
+        try { return RDP.TRANSITION_ALTITUDE; } catch { return 10000; }
+    }
+
+    private volatile List<GroundMapData.MapLayer> _dynamicMapsSnapshot = new();
+
+    /// <summary>Runtime maps vatSys always paints on the ASD: the controlled-sector
+    /// infill ("Dynamic Infill"), active restricted-area outlines ("Dynamic RMAPS",
+    /// Type REST_NTZ_DAIW → PRDArea colour) and their infills. Built on the GUI
+    /// thread, so snapshot there like the crossing/release maps.</summary>
+    public List<GroundMapData.MapLayer> GetDynamicMaps()
+    {
+        try
+        {
+            MMI.InvokeOnGUI(delegate { _dynamicMapsSnapshot = ComputeDynamicMaps(); });
+        }
+        catch { }
+        return _dynamicMapsSnapshot;
+    }
+
+    private static List<GroundMapData.MapLayer> ComputeDynamicMaps()
+    {
+        var result = new List<GroundMapData.MapLayer>();
+        try { AddDynamicMap(result, DisplayMaps.DynamicInfill); } catch { }
+        try { AddDynamicMap(result, DisplayMaps.DynamicRestrictedAreaInfills); } catch { }
+        try { AddDynamicMap(result, DisplayMaps.DynamicRestrictedAreas); } catch { }
+        return result;
+    }
+
+    private static void AddDynamicMap(List<GroundMapData.MapLayer> list, DisplayMaps.Map? map)
+    {
+        if (map is null) return;
+
+        var layer = new GroundMapData.MapLayer
+        {
+            Type = map.Type.ToString(),
+            Name = map.Name ?? "",
+            Folder = "",
+            CustomColour = map.CustomColourName ?? "",
+        };
+
+        foreach (var inf in map.Infills)
+        {
+            if (inf?.Points is null || inf.Points.Count < 3) continue;
+            var poly = new GroundMapData.InfillPolygon
+            {
+                Name = inf.Name ?? "",
+                InfillType = inf.Type.ToString(),
+                Pattern = inf.Pattern.ToString(),
+            };
+            foreach (var c in inf.Points)
+                poly.Points.Add(new[] { Math.Round(c.Latitude, 7), Math.Round(c.Longitude, 7) });
+            layer.Infills.Add(poly);
+        }
+
+        foreach (var ln in map.Lines)
+        {
+            if (ln?.Points is null || ln.Points.Count < 2) continue;
+            var line = new GroundMapData.MapLine
+            {
+                Name = ln.Name ?? "",
+                Pattern = ln.Pattern.ToString(),
+                Width = ln.Width,
+            };
+            foreach (var c in ln.Points)
+                line.Points.Add(new[] { Math.Round(c.Latitude, 7), Math.Round(c.Longitude, 7) });
+            layer.Lines.Add(line);
+        }
+
+        if (layer.Infills.Count > 0 || layer.Lines.Count > 0)
+            list.Add(layer);
+    }
+
     /// <summary>Returns all radar tracks visible within the given bounds.</summary>
     public List<AsdAircraftDto> GetAircraft(double centerLat, double centerLon, double rangeNm)
     {
@@ -132,6 +220,17 @@ public sealed class AsdDataService
                 var verticalSpeed = 0.0;
                 try { verticalSpeed = track.VerticalSpeed; } catch { }
 
+                // Symbol selection inputs (PaintASDTrack): radar source flags, coast and
+                // ident state, and squawk for Tracks.xml SpecialCode symbol variants
+                var radarFlags = 0;
+                try { radarFlags = (int)track.RadarTypes; } catch { }
+                var coasting = false;
+                try { coasting = track.Coasting; } catch { }
+                var identing = false;
+                try { identing = track.Identing; } catch { }
+                var ssr = -1;
+                try { ssr = track.ActualAircraft?.TransponderCode ?? -1; } catch { }
+
                 var state = "NonJurisdiction";
                 try
                 {
@@ -156,6 +255,7 @@ public sealed class AsdDataService
                     catch { }
                 }
 
+                var coupled = false;
                 var wakeCat = "";
                 var aircraftType = "";
                 var runway = "";
@@ -166,9 +266,18 @@ public sealed class AsdDataService
                     var fdr = track.CoupledFDR;
                     if (fdr is not null)
                     {
+                        coupled = true;
                         try { wakeCat = fdr.AircraftWake ?? ""; } catch { }
                         try { aircraftType = fdr.AircraftType ?? ""; } catch { }
-                        try { runway = fdr.DepartureRunway?.Name ?? ""; } catch { }
+                        // vatSys LABEL_ITEM_RWY: departure runway until ATD is set,
+                        // arrival runway once the aircraft has departed
+                        try
+                        {
+                            runway = fdr.ATD != DateTime.MaxValue
+                                ? fdr.ArrivalRunway?.Name ?? ""
+                                : fdr.DepartureRunway?.Name ?? "";
+                        }
+                        catch { }
                         try { destination = fdr.DesAirport ?? ""; } catch { }
                         try { cfl = fdr.CFLUpper; } catch { }
                     }
@@ -213,6 +322,11 @@ public sealed class AsdDataService
                     VSpd = Math.Round(verticalSpeed, 0),
                     State = state,
                     OnGround = onGround,
+                    Coupled = coupled,
+                    RadarFlags = radarFlags,
+                    Coasting = coasting,
+                    Ident = identing,
+                    Ssr = ssr,
                     WakeCat = wakeCat,
                     AircraftType = aircraftType,
                     Runway = runway,
@@ -226,27 +340,15 @@ public sealed class AsdDataService
         return result;
     }
 
-    /// <summary>Gets the HMI state string for a radar track via reflection on the internal Track wrapper.</summary>
+    /// <summary>Gets the HMI state for a radar track. vatSys resolves the display Track
+    /// wrapper via MMI.FindTrack (keyed by the radar track or its coupled FDR) and the
+    /// wrapper holds the HMI state in its public State field.</summary>
     private static string GetTrackState(RDP.RadarTrack radarTrack)
     {
         try
         {
-            // The Track class wraps RadarTrack and holds the State field
-            var fdr = radarTrack.CoupledFDR;
-            if (fdr is null) return "NonJurisdiction";
-
-            // FDR.CoupledTrack points back to the RadarTrack — but the Track object
-            // is the one with State. Use reflection to find it from the FDR.
-            var fdrType = fdr.GetType();
-            // Look for a property/field that returns a Track object with a State field
-            foreach (var prop in fdrType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-            {
-                if (prop.PropertyType.Name != "Track") continue;
-                var trackObj = prop.GetValue(fdr);
-                if (trackObj is null) continue;
-                var stateProp = trackObj.GetType().GetField("State", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                if (stateProp is not null) return stateProp.GetValue(trackObj)?.ToString() ?? "NonJurisdiction";
-            }
+            var track = MMI.FindTrack(radarTrack);
+            if (track is not null) return track.State.ToString();
         }
         catch { }
 
@@ -345,8 +447,12 @@ public sealed class AsdDataService
                     case "ASDBackground": colours.Background = rgb; break;
                     case "PrimaryMap": colours.PrimaryMap = rgb; break;
                     case "SecondaryMap": colours.SecondaryMap = rgb; break;
+                    case "UserMap": colours.UserMap = rgb; break;
+                    case "PRDArea": colours.PRDArea = rgb; break;
                     case "Infill": colours.Infill = rgb; break;
                     case "Jurisdiction": colours.Jurisdiction = rgb; break;
+                    case "GhostJurisdiction": colours.GhostJurisdiction = rgb; break;
+                    case "PostJurisdiction": colours.PostJurisdiction = rgb; break;
                     case "NonJurisdiction": colours.NonJurisdiction = rgb; break;
                     case "NonJurisdictionLabel": colours.NonJurisdictionLabel = rgb; break;
                     case "Announced": colours.Announced = rgb; break;
@@ -354,11 +460,17 @@ public sealed class AsdDataService
                     case "Handover": colours.Handover = rgb; break;
                     case "Emergency": colours.Emergency = rgb; break;
                     case "Warning": colours.Warning = rgb; break;
+                    case "IdentFlash": colours.IdentFlash = rgb; break;
                     case "CFLHighlight": colours.CFLHighlight = rgb; break;
                     case "StaticTools": colours.StaticTools = rgb; break;
                     case "Route": colours.Route = rgb; break;
-                    case "WindowBackground": colours.WindowBackground = rgb; break;
+                    case "WindowBackground":
+                    case "WindowBackgound": colours.WindowBackground = rgb; break;
                     case "InteractiveText": colours.InteractiveText = rgb; break;
+                    case "Custom":
+                        var name = elem.Element("Name")?.Value ?? "";
+                        if (!string.IsNullOrWhiteSpace(name)) colours.CustomColours[name] = rgb;
+                        break;
                 }
             }
         }
@@ -466,7 +578,8 @@ public sealed class AsdDataService
 
                         needed.Remove(key);
                         var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 99;
-                        var layer = new GroundMapData.MapLayer { Type = type, Name = name, Folder = folder, Priority = priority };
+                        var customColour = mapElem.Attribute("CustomColourName")?.Value ?? "";
+                        var layer = new GroundMapData.MapLayer { Type = type, Name = name, Folder = folder, Priority = priority, CustomColour = customColour };
 
                         // Reuse the shared map geometry parser via reflection or parse inline
                         ParseAsdMapGeometry(mapElem, layer);
@@ -486,15 +599,24 @@ public sealed class AsdDataService
 
     private static void ParseAsdMapGeometry(XElement mapElem, GroundMapData.MapLayer layer)
     {
+        // vatSys: lines and infills without their own Pattern inherit the Map's Pattern
+        var mapPattern = mapElem.Attribute("Pattern")?.Value ?? "";
+
+        // vatSys LoadMaps uses GetElementsByTagName, which searches ALL descendants —
+        // some maps nest geometry elements (e.g. <Line> inside <Label>). Use
+        // Descendants throughout to match.
+
         // Infills
-        foreach (var infillElem in mapElem.Elements("Infill"))
+        foreach (var infillElem in mapElem.Descendants("Infill"))
         {
             var infillName = infillElem.Attribute("Name")?.Value ?? "";
+            var infillType = infillElem.Attribute("Type")?.Value ?? "";
+            var infillPattern = infillElem.Attribute("Pattern")?.Value ?? mapPattern;
             var rawText = infillElem.Element("Point")?.Value ?? "";
             if (string.IsNullOrWhiteSpace(rawText))
                 rawText = infillElem.Value;
 
-            var poly = new GroundMapData.InfillPolygon { Name = infillName };
+            var poly = new GroundMapData.InfillPolygon { Name = infillName, InfillType = infillType, Pattern = infillPattern };
             foreach (var part in rawText.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var trimmed = part.Trim();
@@ -508,10 +630,10 @@ public sealed class AsdDataService
         }
 
         // Lines
-        foreach (var lineElem in mapElem.Elements("Line"))
+        foreach (var lineElem in mapElem.Descendants("Line"))
         {
             var lineName = lineElem.Attribute("Name")?.Value ?? "";
-            var linePattern = lineElem.Attribute("Pattern")?.Value ?? "";
+            var linePattern = lineElem.Attribute("Pattern")?.Value ?? mapPattern;
             var lineWidth = double.TryParse(lineElem.Attribute("Width")?.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) ? w : 1.0;
 
             // Collect all coordinate text from the Line element
@@ -531,10 +653,10 @@ public sealed class AsdDataService
             if (!string.IsNullOrWhiteSpace(rawText))
             {
                 var line = new GroundMapData.MapLine { Name = lineName, Pattern = linePattern, Width = lineWidth };
-                // Route format: "CS VOR.A216.HOOVR" — dots but NO slashes
-                // Coordinate format: "-344727.000+1382426.000/..." — has slashes
-                // Waypoint format: "MAKKA/AKMIR/WELSH" — slashes, no dots
-                bool isRoute = rawText.Contains('.') && !rawText.Contains('/');
+                // Airway route format "CS VOR.A216.HOOVR" — vatSys DisplayMaps.LoadMaps
+                // detects it with this exact regex; anything else is slash-separated
+                // coordinates or waypoint names.
+                bool isRoute = RouteRegex.IsMatch(rawText.Trim());
                 if (isRoute)
                 {
                     // Route: split by dots and resolve each named fix
@@ -565,7 +687,7 @@ public sealed class AsdDataService
         }
 
         // Symbols
-        foreach (var symElem in mapElem.Elements("Symbol"))
+        foreach (var symElem in mapElem.Descendants("Symbol"))
         {
             var symType = symElem.Attribute("Type")?.Value ?? "DotFillCircle";
             foreach (var ptElem in symElem.Elements("Point"))
@@ -579,7 +701,7 @@ public sealed class AsdDataService
         }
 
         // Labels
-        foreach (var labelElem in mapElem.Elements("Label"))
+        foreach (var labelElem in mapElem.Descendants("Label"))
         {
             foreach (var ptElem in labelElem.Elements("Point"))
             {
@@ -598,7 +720,7 @@ public sealed class AsdDataService
         }
 
         // Runways — draw as lines with extended centerlines
-        foreach (var rwyElem in mapElem.Elements("Runway"))
+        foreach (var rwyElem in mapElem.Descendants("Runway"))
         {
             var thresholds = rwyElem.Elements("Threshold").ToList();
             if (thresholds.Count < 2) continue;
@@ -695,62 +817,22 @@ public sealed class AsdDataService
 
     private void EnsureProfileDir()
     {
-        try
+        lock (_lock)
         {
-            var currentName = Profile.Name ?? "";
-            if (!string.IsNullOrEmpty(_profileDir) && currentName == _profileName) return;
-            if (!string.IsNullOrEmpty(_profileDir) && currentName != _profileName) _profileDir = "";
+            string currentName;
+            try { currentName = Profile.Name ?? ""; } catch { currentName = ""; }
+
+            if (!string.IsNullOrEmpty(_profileDir) && currentName == _profileName)
+                return;
+
+            // First resolution or profile changed — clear caches and re-resolve
+            _positions = null;
+            _colours = null;
+            _asdMaps = null;
+
+            _profileDir = ProfileLocator.Resolve();
+            _profileName = currentName;
         }
-        catch
-        {
-            if (!string.IsNullOrEmpty(_profileDir)) return;
-        }
-
-        _positions = null;
-        _colours = null;
-        _asdMaps = null;
-
-        try
-        {
-            var name = Profile.Name;
-            if (!string.IsNullOrEmpty(name))
-            {
-                var docDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                var candidates = new[]
-                {
-                    Path.Combine(docDir, "vatSys Files", "Profiles", name),
-                    Path.Combine(docDir, "vatSys", "Profiles", name),
-                };
-                foreach (var dir in candidates)
-                {
-                    if (Directory.Exists(dir))
-                    {
-                        _profileDir = dir;
-                        _profileName = name ?? "";
-                        return;
-                    }
-                }
-            }
-        }
-        catch { }
-
-        var profilesRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "vatSys Files", "Profiles");
-
-        if (Directory.Exists(profilesRoot))
-        {
-            foreach (var dir in Directory.GetDirectories(profilesRoot))
-            {
-                if (File.Exists(Path.Combine(dir, "Positions.xml")))
-                {
-                    _profileDir = dir;
-                    return;
-                }
-            }
-        }
-
-        _profileDir = "";
     }
 }
 
@@ -766,6 +848,14 @@ public sealed class AsdAircraftDto
     public double VSpd { get; set; }
     public string State { get; set; } = "NonJurisdiction";
     public bool OnGround { get; set; }
+    /// <summary>True when an FDR is coupled to the radar track.</summary>
+    public bool Coupled { get; set; }
+    /// <summary>RDP.RadarTypes flags: 1=PRI 2=ModeC 4=ModeS 8=ADSB 16=SMR 32=SMR_ADSB.</summary>
+    public int RadarFlags { get; set; }
+    public bool Coasting { get; set; }
+    public bool Ident { get; set; }
+    /// <summary>Transponder code for Tracks.xml SpecialCode symbol variants (-1 unknown).</summary>
+    public int Ssr { get; set; } = -1;
     public string WakeCat { get; set; } = "";
     public string AircraftType { get; set; } = "";
     public string Runway { get; set; } = "";

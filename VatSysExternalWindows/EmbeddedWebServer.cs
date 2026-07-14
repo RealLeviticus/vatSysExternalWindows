@@ -104,6 +104,10 @@ public sealed class EmbeddedWebServer : IDisposable
             NetworkStream? stream = null;
             try
             {
+                // A client that connects but never completes a request must not
+                // hold a worker forever.
+                client.ReceiveTimeout = 10000;
+                client.SendTimeout = 10000;
                 stream = client.GetStream();
                 var req = ReadRequest(stream);
                 if (req is not null) Route(stream, req);
@@ -169,6 +173,18 @@ public sealed class EmbeddedWebServer : IDisposable
         if (req.Path == "/api/groundmaps")
         {
             WriteJson(s, 200, new { Maps = _data.GetGroundMaps(), Colours = _data.GetColours() });
+            return;
+        }
+
+        // Tracks.xml symbol geometry + current font sizes (shared by both windows)
+        if (req.Path == "/api/symbols")
+        {
+            WriteJson(s, 200, new
+            {
+                Symbols = _data.GetTrackSymbols(),
+                LabelFontSize = _data.GetLabelFontSize(),
+                MapFontSize = _data.GetMapFontSize(),
+            });
             return;
         }
 
@@ -242,7 +258,20 @@ public sealed class EmbeddedWebServer : IDisposable
 
         if (req.Path == "/api/asd/maps")
         {
-            WriteJson(s, 200, new { Maps = _asd.GetAsdMaps(), Colours = _asd.GetColours(), VelocityVectors = _asd.GetVelocityVectors() });
+            WriteJson(s, 200, new
+            {
+                Maps = _asd.GetAsdMaps(),
+                Colours = _asd.GetColours(),
+                VelocityVectors = _asd.GetVelocityVectors(),
+                TransitionAltitude = _asd.GetTransitionAltitude(),
+            });
+            return;
+        }
+
+        // Runtime dynamic maps: controlled-sector infill + active restricted areas
+        if (req.Path == "/api/asd/dynamicmaps")
+        {
+            WriteJson(s, 200, _asd.GetDynamicMaps());
             return;
         }
 

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Windows.Forms;
@@ -21,6 +20,7 @@ public sealed class GroundDataService
     private readonly Dictionary<string, GroundMapData.AirportMap> _mapCache = new(StringComparer.OrdinalIgnoreCase);
     private GroundMapData.ColourSet? _colours;
     private List<GroundMapData.GroundMapMeta>? _groundMaps;
+    private List<TrackSymbolData.SymbolDef>? _symbols;
 
     // Position history: use vatSys RadarTrack.PositionHistory directly
     // Dot count controlled by MMI.HistoryDots user setting (default 5, max 9)
@@ -78,6 +78,26 @@ public sealed class GroundDataService
         return _groundMaps;
     }
 
+    /// <summary>Returns the profile's Tracks.xml symbol definitions (with DefaultTracks.xml backfill).</summary>
+    public List<TrackSymbolData.SymbolDef> GetTrackSymbols()
+    {
+        EnsureProfileDir();
+        _symbols ??= TrackSymbolData.Load(_profileDir);
+        return _symbols;
+    }
+
+    /// <summary>Current ASD label font size in pixels (MMI.ASDMainFont honours the user's setting).</summary>
+    public double GetLabelFontSize()
+    {
+        try { return MMI.ASDMainFont.Size; } catch { return 18; }
+    }
+
+    /// <summary>Current ASD map font size in pixels.</summary>
+    public double GetMapFontSize()
+    {
+        try { return MMI.ASDMapFont.Size; } catch { return 16; }
+    }
+
     /// <summary>Loads geometry for specific map layers identified by "Folder/Name" keys.</summary>
     public List<GroundMapData.MapLayer> GetMapLayers(List<string> mapKeys)
     {
@@ -101,6 +121,11 @@ public sealed class GroundDataService
             try
             {
                 if (track.Cancelled) continue;
+
+                // vatSys PaintGroundTracks skips tracks without a network pilot
+                var pilot = track.ActualAircraft;
+                if (pilot is null) continue;
+
                 var coord = track.LatLong;
                 if (coord is null) continue;
 
@@ -110,51 +135,40 @@ public sealed class GroundDataService
                 if (Math.Abs(lat - map.CenterLat) > 0.15 || Math.Abs(lon - map.CenterLon) > 0.15)
                     continue;
 
-                var callsign = "";
-                var heading = 0.0;
-                var groundSpeed = 0.0;
                 var onGround = false;
-
                 try { onGround = track.OnGround; } catch { }
-                // vatSys uses networkPilot.Heading (aircraft nose direction) for ground symbols,
-                // NOT track.Heading (calculated track/movement direction). These differ during pushback.
-                try
-                {
-                    var pilot = track.ActualAircraft;
-                    if (pilot is not null)
-                        heading = pilot.Heading;
-                    else
-                        heading = track.Heading;
-                }
-                catch { try { heading = track.Heading; } catch { } }
+
+                // vatSys rotates ground symbols to the pilot's reported heading (nose
+                // direction — differs from track during pushback) and paints airborne
+                // symbols with the calculated radar track heading.
+                var heading = 0.0;
+                try { heading = onGround ? pilot.Heading : track.Heading; } catch { }
+
+                var groundSpeed = 0.0;
                 try { groundSpeed = track.GroundSpeed; } catch { }
 
-                try
-                {
-                    var fdr = track.CoupledFDR;
-                    if (fdr is not null) callsign = fdr.Callsign ?? "";
-                }
-                catch { }
+                // Symbol selection inputs (PaintGroundTracks): radar source flags and
+                // squawk code for Tracks.xml SpecialCode symbol variants
+                var radarFlags = 0;
+                try { radarFlags = (int)track.RadarTypes; } catch { }
+                var ssr = -1;
+                try { ssr = pilot.TransponderCode; } catch { }
 
-                if (string.IsNullOrEmpty(callsign))
-                {
-                    try
-                    {
-                        var pilot = track.ActualAircraft;
-                        if (pilot is not null) callsign = pilot.Callsign ?? "";
-                    }
-                    catch { }
-                }
+                // vatSys: ASMGCSCoupledFDR takes precedence over CoupledFDR for ground display
+                FDP2.FDR? fdr = null;
+                try { fdr = track.ASMGCSCoupledFDR ?? track.CoupledFDR; } catch { }
+
+                var callsign = "";
+                try { callsign = fdr?.Callsign ?? ""; } catch { }
+                if (string.IsNullOrEmpty(callsign)) callsign = pilot.Callsign ?? "";
 
                 var category = "unknown";
                 var wakeCat = "";
                 var aircraftType = "";
                 var runway = "";
-                try
+                if (fdr is not null)
                 {
-                    // vatSys: ASMGCSCoupledFDR takes precedence over CoupledFDR for ground display
-                    var fdr = track.ASMGCSCoupledFDR ?? track.CoupledFDR;
-                    if (fdr is not null)
+                    try
                     {
                         var dep = fdr.DepAirport ?? "";
                         var arr = fdr.DesAirport ?? "";
@@ -167,10 +181,46 @@ public sealed class GroundDataService
 
                         try { wakeCat = fdr.AircraftWake ?? ""; } catch { }
                         try { aircraftType = fdr.AircraftType ?? ""; } catch { }
-                        try { runway = fdr.DepartureRunway?.Name ?? ""; } catch { }
+                        // vatSys LABEL_ITEM_RWY: departure runway until ATD is set,
+                        // arrival runway once the aircraft has departed
+                        try
+                        {
+                            runway = fdr.ATD != DateTime.MaxValue
+                                ? fdr.ArrivalRunway?.Name ?? ""
+                                : fdr.DepartureRunway?.Name ?? "";
+                        }
+                        catch { }
                     }
+                    catch { }
                 }
-                catch { }
+
+                // vatSys wake fallback for uncoupled/blank wake: performance data for the
+                // pilot's reported type, then engine type (piston → L, turboprop → M).
+                if (string.IsNullOrEmpty(wakeCat))
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(pilot.AircraftType))
+                            wakeCat = Performance.GetAircraftFromType(pilot.AircraftType)?.WakeCategory ?? "";
+                    }
+                    catch { }
+                }
+                if (string.IsNullOrEmpty(wakeCat))
+                {
+                    try
+                    {
+                        // NetworkPilot.EngineType is from the unreferenced vatSys network
+                        // assembly — read it reflectively.
+                        var engineField = pilot.GetType().GetField("EngineType");
+                        if (engineField is not null)
+                        {
+                            var engine = Convert.ToInt32(engineField.GetValue(pilot));
+                            if (engine == 0) wakeCat = "L";
+                            else if (engine == 1) wakeCat = "M";
+                        }
+                    }
+                    catch { }
+                }
 
                 // Get position history trail dots from vatSys RadarTrack.PositionHistory
                 double[][]? history = null;
@@ -210,6 +260,9 @@ public sealed class GroundDataService
                     Alt = altitude,
                     OnGround = onGround,
                     Category = category,
+                    Coupled = fdr is not null,
+                    RadarFlags = radarFlags,
+                    Ssr = ssr,
                     WakeCat = wakeCat,
                     AircraftType = aircraftType,
                     Runway = runway,
@@ -222,10 +275,32 @@ public sealed class GroundDataService
         return result;
     }
 
+    private volatile List<string> _visibleMapsSnapshot = new();
+
     /// <summary>Returns the currently visible crossing/released map layer keys from vatSys Ground windows.</summary>
     public List<string> GetVisibleCrossingReleasedMaps()
     {
-        var result = new List<string>();
+        // Application.OpenForms and the ASD control state belong to the GUI thread —
+        // queue a snapshot refresh there and serve the latest completed one. The
+        // endpoint is polled continuously, so at most one poll of staleness.
+        try
+        {
+            MMI.InvokeOnGUI(delegate { _visibleMapsSnapshot = ComputeVisibleCrossingReleasedMaps(); });
+        }
+        catch { }
+        return _visibleMapsSnapshot;
+    }
+
+    private static List<string> ComputeVisibleCrossingReleasedMaps()
+    {
+        // Prefer the live state of an open vatSys Ground window. When none is open,
+        // derive the state from OzStrips' runway bay directly — OzStrips can only
+        // push its crossing/release toggles into Ground windows that exist.
+        return ComputeFromGroundWindow() ?? ComputeFromOzStrips() ?? new List<string>();
+    }
+
+    private static List<string>? ComputeFromGroundWindow()
+    {
         try
         {
             // Find ASMGCS Ground windows via Application.OpenForms
@@ -245,6 +320,7 @@ public sealed class GroundDataService
                 var isVisibleMethod = asdControl.GetType().GetMethod("IsMapVisible");
                 if (isVisibleMethod is null) continue;
 
+                var result = new List<string>();
                 foreach (var map in DisplayMaps.Maps)
                 {
                     if (map.Category != DisplayMaps.MapCategories.Ground) continue;
@@ -261,82 +337,156 @@ public sealed class GroundDataService
                     }
                 }
 
-                break; // Only need one Ground window
+                return result; // Only need one Ground window
             }
         }
         catch { }
-        return result;
+        return null;
+    }
+
+    /// <summary>Replicates OzStrips' MapManager.SetApplicableMaps decision by reading its
+    /// runway-bay bar strips via reflection (MainFormController.Instance is public static).
+    /// Returns null when OzStrips isn't running or its state can't be read.</summary>
+    private static List<string>? ComputeFromOzStrips()
+    {
+        try
+        {
+            Type? ctrlType = null;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { ctrlType = asm.GetType("MaxRumsey.OzStripsPlugin.GUI.MainFormController"); }
+                catch { }
+                if (ctrlType is not null) break;
+            }
+            if (ctrlType is null) return null;
+
+            var controller = ctrlType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            if (controller is null) return null;
+
+            // OzStrips skips map updates entirely while "Inhibit ground maps" is checked
+            var inhibit = GetMember(controller, "InhibitGroundMaps");
+            if (inhibit is not null &&
+                GetMember(inhibit, "Checked") is bool inhibited && inhibited)
+                return null;
+
+            var mainForm = GetMember(controller, "_mainForm");
+            var bayManager = GetMember(controller, "_bayManager");
+            if (mainForm is null || bayManager is null) return null;
+
+            var icao = GetMember(bayManager, "AerodromeName") as string ?? "";
+            if (string.IsNullOrEmpty(icao)) return null;
+
+            // Aerodrome full name = the Maps folder (AutoMapAerodromes ICAO→FullName)
+            string? fullName = null;
+            var settings = GetMember(GetMember(mainForm, "AerodromeManager"), "Settings");
+            if (GetMember(settings, "AutoMapAerodromes") is System.Collections.IEnumerable autoMaps)
+            {
+                foreach (var am in autoMaps)
+                {
+                    if (string.Equals(GetMember(am, "ICAOCode") as string, icao, StringComparison.OrdinalIgnoreCase))
+                    {
+                        fullName = GetMember(am, "FullName") as string;
+                        break;
+                    }
+                }
+            }
+            if (string.IsNullOrEmpty(fullName)) return null;
+
+            // Bar texts from the first runway bay (OzStrips uses BAY_RUNWAY)
+            var barNames = new List<string>();
+            var foundBay = false;
+            if (GetMember(GetMember(bayManager, "BayRepository"), "Bays") is System.Collections.IEnumerable bays)
+            {
+                foreach (var bay in bays)
+                {
+                    var isRunway = false;
+                    if (GetMember(bay, "BayTypes") is System.Collections.IEnumerable types)
+                    {
+                        foreach (var t in types)
+                        {
+                            if (t?.ToString() == "BAY_RUNWAY") { isRunway = true; break; }
+                        }
+                    }
+                    if (!isRunway) continue;
+
+                    foundBay = true;
+                    if (GetMember(bay, "Strips") is System.Collections.IEnumerable strips)
+                    {
+                        foreach (var s in strips)
+                        {
+                            if (GetMember(s, "Type")?.ToString() == "BAR")
+                                barNames.Add(GetMember(s, "BarText") as string ?? "");
+                        }
+                    }
+                    break;
+                }
+            }
+            if (!foundBay) return null;
+
+            // Same decision as OzStrips MapManager: map "Crossing_16L34R" is visible
+            // when a bar "XXX CROSSING RWY 16L/34R…" exists; "Released_16L34R" when
+            // a bar "Runway 16L/34R Released…" exists.
+            var result = new List<string>();
+            foreach (var map in DisplayMaps.Maps)
+            {
+                if (map.Category != DisplayMaps.MapCategories.Ground) continue;
+                if (!string.Equals(map.Folder, fullName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var crossing = map.Name.StartsWith("Crossing", StringComparison.OrdinalIgnoreCase);
+                var released = map.Name.StartsWith("Released", StringComparison.OrdinalIgnoreCase);
+                if (!crossing && !released) continue;
+
+                var parts = map.Name.Split('_');
+                if (parts.Length < 2 || parts[1].Length % 2 != 0) continue;
+                var pair = parts[1];
+                var r0 = pair.Substring(0, pair.Length / 2);
+                var r1 = pair.Substring(pair.Length / 2);
+
+                var wanted = crossing ? "XXX CROSSING RWY " + r0 + "/" + r1
+                                      : "Runway " + r0 + "/" + r1 + " Released";
+                var on = barNames.Any(b => b.StartsWith(wanted, StringComparison.Ordinal));
+                if (on)
+                {
+                    var key = string.IsNullOrEmpty(map.Folder) ? map.Name : map.Folder + "/" + map.Name;
+                    result.Add(key);
+                }
+            }
+            return result;
+        }
+        catch { return null; }
+    }
+
+    private static object? GetMember(object? obj, string name)
+    {
+        if (obj is null) return null;
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var t = obj.GetType();
+        var p = t.GetProperty(name, flags);
+        if (p is not null) return p.GetValue(obj);
+        return t.GetField(name, flags)?.GetValue(obj);
     }
 
     private void EnsureProfileDir()
     {
-        // Detect profile change
-        try
+        lock (_lock)
         {
-            var currentName = Profile.Name ?? "";
+            string currentName;
+            try { currentName = Profile.Name ?? ""; } catch { currentName = ""; }
+
             if (!string.IsNullOrEmpty(_profileDir) && currentName == _profileName)
                 return;
-            if (!string.IsNullOrEmpty(_profileDir) && currentName != _profileName)
-            {
-                // Profile changed — clear everything
-                _profileDir = "";
-            }
+
+            // First resolution or profile changed — clear caches and re-resolve
+            _positions = null;
+            _mapCache.Clear();
+            _colours = null;
+            _groundMaps = null;
+            _symbols = null;
+
+            _profileDir = ProfileLocator.Resolve();
+            _profileName = currentName;
         }
-        catch
-        {
-            if (!string.IsNullOrEmpty(_profileDir)) return;
-        }
-
-        // Clear stale caches when re-resolving
-        _positions = null;
-        _mapCache.Clear();
-        _colours = null;
-        _groundMaps = null;
-
-        try
-        {
-            var name = Profile.Name;
-            if (!string.IsNullOrEmpty(name))
-                {
-                    // Check standard vatSys profile locations
-                    var docDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                    var candidates = new[]
-                    {
-                        Path.Combine(docDir, "vatSys Files", "Profiles", name),
-                        Path.Combine(docDir, "vatSys", "Profiles", name),
-                    };
-
-                    foreach (var dir in candidates)
-                    {
-                        if (Directory.Exists(dir))
-                        {
-                            _profileDir = dir;
-                            _profileName = name ?? "";
-                            return;
-                        }
-                    }
-                }
-        }
-        catch { }
-
-        // Scan for any profile with a Positions.xml
-        var profilesRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "vatSys Files", "Profiles");
-
-        if (Directory.Exists(profilesRoot))
-        {
-            foreach (var dir in Directory.GetDirectories(profilesRoot))
-            {
-                if (File.Exists(Path.Combine(dir, "Positions.xml")))
-                {
-                    _profileDir = dir;
-                    return;
-                }
-            }
-        }
-
-        _profileDir = "";
     }
 }
 
@@ -350,6 +500,12 @@ public sealed class AircraftDto
     public int Alt { get; set; } = -1;
     public bool OnGround { get; set; }
     public string Category { get; set; } = "unknown";
+    /// <summary>True when an FDR is coupled (ASMGCS or radar coupling).</summary>
+    public bool Coupled { get; set; }
+    /// <summary>RDP.RadarTypes flags: 1=PRI 2=ModeC 4=ModeS 8=ADSB 16=SMR 32=SMR_ADSB.</summary>
+    public int RadarFlags { get; set; }
+    /// <summary>Transponder code for Tracks.xml SpecialCode symbol variants (-1 unknown).</summary>
+    public int Ssr { get; set; } = -1;
     public string WakeCat { get; set; } = "";
     public string AircraftType { get; set; } = "";
     public string Runway { get; set; } = "";
