@@ -6,9 +6,9 @@ A vatSys plugin that serves browser-based Ground (A-SMGCS) and Air (ASD) display
 
 - **Ground and Air displays** — choose an A-SMGCS Ground window or an ASD Air window from the browser landing page
 - **Profile-driven rendering** — uses the loaded profile's colours, symbols, fonts, labels, positions, map layers, ranges, and rotations to closely reproduce the corresponding vatSys window
-- **Live aircraft tracking** — refreshes tracks twice per second with ground/air symbol selection, category or jurisdiction colouring, velocity vectors, and history dots where applicable
-- **Runtime map synchronisation** — Ground crossing/release maps follow vatSys visibility; ASD sector infill and active restricted areas refresh automatically
-- **Full profile support** — reads `Positions.xml`, `Colours.xml`, `Tracks.xml`, and related settings from whichever profile vatSys has loaded, and takes map geometry straight from the maps vatSys itself loaded (airways, navaid and bearing/range points, labels, symbols and runways resolve exactly as they do in vatSys)
+- **Live aircraft tracking** — refreshes tracks twice per second; the plugin decides each track's symbols, colour and label inside vatSys, from vatSys's own state, the way vatSys paints them
+- **Runtime map synchronisation** — Ground crossing/release maps follow vatSys visibility; the controlled-sector infill (when vatSys's Dynamic Infill setting is on) and active restricted areas refresh automatically, painted in vatSys's order
+- **Full profile support** — builds every label from the profile's `Labels.xml` as vatSys parsed it (any label layout, including items other plugins supply), reads `Positions.xml`, `Colours.xml`, `Tracks.xml`, and related settings from whichever profile vatSys has loaded, and takes map geometry straight from the maps vatSys itself loaded (airways, navaid and bearing/range points, labels, symbols and runways resolve exactly as they do in vatSys)
 - **On-demand map loading** — layers load individually when toggled, keeping the initial page load fast
 - **Touch-optimised UI** — pan, pinch-zoom, scroll-zoom, double-tap reset, movable labels, and touch-friendly map/position menus
 - **Self-contained** — single plugin DLL, no external dependencies beyond vatSys itself
@@ -20,7 +20,7 @@ The plugin starts a lightweight HTTP server on **port 5300** inside the vatSys p
 1. Fetch Ground or ASD positions and map metadata from the currently loaded profile
 2. Load selected map-layer geometry on demand
 3. Poll live radar tracks every 500 milliseconds
-4. Refresh runtime ASD sector/restricted-area maps every 5 seconds
+4. Refresh the runtime sector-infill/restricted-area maps every 2 seconds
 5. Render the display client-side on a `<canvas>` using profile data and vatSys-style rendering rules
 
 The server has no login or encryption and is intended only for a trusted local network. Do not expose port `5300` directly to the internet. It answers `GET`/`HEAD` only, sends no CORS headers (the pages are same-origin), drops requests that do not arrive within 10 seconds, and caps concurrent connections.
@@ -33,36 +33,40 @@ The server has no login or encryption and is intended only for a trusted local n
 | `GET /ground`, `GET /asd` | Ground / Air window web applications |
 | `GET /api/airports` | All ASMGCS positions with name, airport, group, center, range, rotation, magnetic variation, and map references |
 | `GET /api/groundmaps` | All Ground-category map metadata + colour scheme (for the Maps dropdown) |
-| `GET /api/symbols` | Track symbol geometry parsed from the profile's Tracks.xml (DefaultTracks.xml backfill) + current label/map font sizes |
+| `GET /api/symbols` | Track symbol geometry parsed from the profile's Tracks.xml (DefaultTracks.xml backfill) + the label/map font sizes and character cell sizes vatSys lays text out with |
 | `GET /api/maplayers?maps=Folder/Name,...` | Geometry (infills, lines, labels, symbols, runways) for specific map layers |
-| `GET /api/aircraft?icao=XXXX&range=NM` | Live aircraft within `range` NM of the airport's position centre (a small default box when omitted) with callsign, position, heading, groundspeed, radar flags, squawk, wake category, type, runway, on-ground state, category, and position history |
+| `GET /api/aircraft?icao=XXXX&lat=...&lon=...&range=NM` | Tracks within `range` NM of the client's screen centre (a small box around the airport's position centre when omitted), each ready to paint: position, colour, symbols, history, and the label as rows of character cells |
 | `GET /api/visiblemaps` | Crossing/Release map layers currently visible in the vatSys Ground window |
 | `GET /api/asd/positions` | ASD positions from the loaded profile |
-| `GET /api/asd/maps` | ASD map metadata, colours, velocity-vector setting, and transition altitude |
-| `GET /api/asd/dynamicmaps` | Runtime controlled-sector infill and active restricted areas |
+| `GET /api/asd/maps` | ASD map metadata and colours |
+| `GET /api/asd/dynamicmaps` | Runtime maps in vatSys paint order: `Below` the file maps (controlled-sector infill, restricted-area infills) and `Above` them (restricted-area outlines, also drawn on the Ground page) |
 | `GET /api/asd/maplayers?maps=Folder/Name,...` | Geometry for selected ASD map layers |
-| `GET /api/asd/aircraft?lat=...&lon=...&range=...` | Live aircraft within the requested ASD viewport |
+| `GET /api/asd/aircraft?lat=...&lon=...&range=...` | Tracks within the requested ASD viewport, in the same ready-to-paint form (plus HMI state and velocity vector) |
 
 ### Rendering Details
 
 | Element | Specification |
 |---|---|
 | Track symbols | Exact geometry from the profile's Tracks.xml (paths/ellipses/rects, per-squawk SpecialCode variants), served via `/api/symbols`. StrokeWidth 0 → filled, otherwise stroked outline — same as vatSys geometry realisations |
-| Ground symbol selection | Port of `PaintGroundTracks`: coupled or SSR/ADSB ground tracks get the wake-category symbol (L/M/H/J → GroundLight/Medium/Heavy/Super, else Ground); airborne tracks get Primary (PSR/SMR) and/or ModeS (any SSR source); primary-only ground returns get the Ground symbol with no label |
-| Air symbol selection | Port of `PaintASDTrack`: ModeS → ModeA → ADSB by radar flags, Coast crosshair/cross when coasting, Primary cross overlay on PSR returns, ident blink in IdentFlash colour |
-| Velocity vectors | Exact algorithm: segments of `min(5, VV)` minutes along track heading with VelocityMarker symbols at intermediate points |
+| Ground symbol selection | Port of `PaintGroundTracks`, decided in the plugin: coupled or SSR/ADSB ground tracks get the wake-category symbol (L/M/H/J → GroundLight/Medium/Heavy/Super, else Ground; the category is withheld for Mode C-only returns and transponder-off primary returns, and falls back to the pilot's type, then engine type); airborne tracks get Primary (PSR/SMR) and/or ModeS (any SSR source); primary-only ground returns get the Ground symbol with no label; the track selected in vatSys gets the Selection symbol |
+| Air symbol selection | Port of `PaintASDTrack`, decided in the plugin: ModeS → ModeA → ADSB by radar flags, Cancelled symbol for cancelled tracks, Coast symbols when coasting, Primary overlay on PSR returns, ident blink in the IdentFlash colour, Selection on the track selected in vatSys. Tracks are painted grouped by HMI state, each group's symbols before its labels |
+| Projection | Port of `ConvertLLToScreen`: stereographic about the screen centre, zoomed so the range spans the window width (`SetZoom` / `CalculateZoom`); panning and zooming move the screen centre. Range limits as vatSys: 10–9999 NM (Air), 0.1–30 NM (Ground) |
+| Velocity vectors | Port of `PaintASDTrack`: 1-minute segments (5-minute once the setting is above 5), each a great-circle step along the track heading, with VelocityMarker symbols at intermediate points |
+| Track visibility | Air: tracks whose display track is not `IsVisibleASD` are omitted; Ground: tracks outside the window are not drawn |
 | History dots | HistoryMarker symbol at past positions, capped at `MMI.HistoryDots` |
-| Aircraft labels | `MMI.ASDMainFont` size (default 18px bold Terminus), Labels.xml formats: GroundAir / GroundDeparture / GroundArrival / GroundLimited (ground), Normal / Limited (air) |
-| Label item formats | Exact `PaintLabel` ports — ACID: FDR callsign, or squawk (4-digit octal) for SSR-only uncoupled tracks (ADS-B broadcasts callsign); LEVEL: alt/100 as D3; RWY: departure runway until ATD set, then arrival runway; vertical indicator: ® / ¬ / > Terminus glyphs at ±300fpm, hidden while coasting; CFL: D3 with VSA sentinel; GS: round(gs/10) 2-padded, ++ outside 0–995; Limited level: FLnnn above transition altitude, 5-digit feet below |
+| Aircraft labels | Port of `PaintLabel`. The plugin walks the label definition vatSys parsed from `Labels.xml` and sends each label as rows of fixed-width character cells with text, colour, background and border; the page places them (`GetItemRectF`, including west-side and justified layouts) on vatSys's character cell (`MainFontWidth` × `MainFontHeight`). All built-in item types are ported, plus items supplied by other plugins. Empty fixed-width items still take their space, hidden/toggled lines, shared (timeshare) lines and the leader anchor row follow vatSys, and the alert box is drawn around the label |
+| Label type and visibility | Ground: GroundDeparture / GroundArrival / GroundAir / GroundLimited as `PaintGroundTracks` chooses. Air (`PaintASDLabel`): Normal, Extended, Quicktag or Limited; non-jurisdiction traffic is labelled only when airborne, inside the level filters and not matched by an SSR code filter, unless quick-look or an alert applies |
+| Label colours | Track colour, with non-jurisdiction labels in the NonJurisdictionLabel colour, per-item colours from `Labels.xml` (e.g. a new CFL highlighted), alert-priority colours, quick-look colours and plugin track colours. Handover-in and post-jurisdiction labels blink on vatSys's 600 ms flash cycle |
+| Label position | The direction and leader length set on the track in vatSys; a label moved on the page keeps the page's position until reload |
 | Map geometry | Served from `DisplayMaps.Maps` — the maps vatSys parsed itself — so airway lines (`FIX.AIRWAY.FIX`), navaid-suffixed and bearing/range points, nearest-duplicate fix resolution and great-circle segments match vatSys. The map lists are empty until vatSys has finished loading the profile; the pages retry |
 | Map labels | Port of `PaintMap`: `MMI.ASDMapFont` size (default 16px) in the map layer's own colour; leader line and offset per `LabelOrientation`, `Alignment` / `VerticalAlignment` / `Border` honoured, labels that would overlap an earlier label of the same map are skipped |
 | Map symbols | All 14 `Map.Symbol.Types`, same geometry as the vatSys symbol bitmaps (SolidSquare when no type is given) |
 | Runways | 2.5px line between thresholds, 1px extended centrelines by bearing/range from the threshold, 12px tick marks |
 | Leader line | Direction × 22.5°, length × 35px + 5 (matches `Track.LABEL_LEN_UNIT` and `CalculateLabelLocation`) |
-| Track colours | Ground: Departure / Arrival / Local / Unknown; Air: HMI state via `MMI.FindTrack` → `Track.State` (Preactive renders NonJurisdiction, as vatSys does) |
+| Track colours | Ports of `SelectGroundBrush` and `SelectASDBrush`: a plugin's custom track colour first; Ground: Departure / Arrival / Local / Unknown; Air: by HMI state, with the quick-look colours (Preactive renders NonJurisdiction, as vatSys does) |
 | Map colours | Port of `SelectMapBrush`: Ground_RWY/TWY/APR/BLD/INF + custom colours; ASD System/System2/Flex/Filled/UserMap/PRDArea. Infill `Type="Background"` paints the window background colour |
 | Layer priority | Descending sort — higher priority drawn first (behind lower priority) |
-| Coordinate rotation | Map: `position.Rotation + MagneticVariation`; ground symbols additionally rotate to `NetworkPilot.Heading` (airborne symbols are screen-fixed) |
+| Coordinate rotation | Map: `position.Rotation + MagneticVariation`; rotate-to-track symbols turn by heading + stereographic north correction + map rotation, as `PaintTrackGeometryRealisation` does (ground symbols use `NetworkPilot.Heading`; other symbols are screen-fixed) |
 
 ## Build Requirements
 
@@ -184,6 +188,9 @@ vatSysExternalWindows/
     ├── EmbeddedWebServer.cs       # TCP HTTP server and JSON API routing
     ├── ProfileLocator.cs          # Resolves the currently loaded profile directory
     ├── MapSource.cs               # Map metadata/geometry from vatSys's loaded maps (shared by both windows)
+    ├── TrackData.cs               # Ready-to-paint track data, colours, history, font cell sizes
+    ├── TrackLabelBuilder.cs       # Port of vatSys PaintLabel: labels as character cells
+    ├── VatSysInternals.cs         # Reflection access to non-public vatSys state (labels, alerts, plugin hooks)
     ├── GroundDataService.cs       # Ground positions, tracks, symbols, and runtime data
     ├── GroundMapData.cs           # Ground position, colour, and coordinate parsing
     ├── AsdDataService.cs          # ASD positions, colours, tracks, and dynamic layers

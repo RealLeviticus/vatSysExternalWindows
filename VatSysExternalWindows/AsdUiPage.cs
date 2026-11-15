@@ -69,18 +69,16 @@ let positions=[];
 let allAsdMaps=[];
 let colours=null;
 let selectedPos=null;
-let vvMinutes=0;
 
 let centerLat=-27,centerLon=153,nmRange=200;
-let panX=0,panY=0;
 
 let layerState={};
 let aircraft=[];
 let acTimer=null;
 let labelFontSize=18,mapFontSize=16;
-let flashOn=true,flashTimer=null;
-let transAlt=10000;
-let dynamicLayers=[];
+// Map label character cell (ASDControlDX MapFontWidth / MapFontHeight)
+let mapFontW=0,mapFontH=0;
+let dynamicBelow=[],dynamicAbove=[];
 
 /* ============================================================
    Track symbols — served from the profile's Tracks.xml via
@@ -154,13 +152,14 @@ function traceShape(sh,fillOnly){
   }
   return false;
 }
-function drawSymbol(type,ssr,x,y,headingDeg,col){
+function drawSymbol(type,ssr,x,y,headingDeg,col,lat,lon){
   let def=getSymbol(type,ssr);
   if(!def) return;
   ctx.save();
   ctx.translate(x,y);
+  // PaintTrackGeometryRealisation: heading + stereographic north correction + screen rotation
   if(def.Rotate&&headingDeg!=null&&headingDeg!==-1)
-    ctx.rotate(headingDeg*Math.PI/180);
+    ctx.rotate(headingDeg*D2R+(lat!=null?northCorrection(lat,lon):0)+viewRotationRad());
   let filled=def.StrokeWidth===0;
   for(let sh of def.Shapes){
     if(!traceShape(sh,filled)) continue;
@@ -171,18 +170,81 @@ function drawSymbol(type,ssr,x,y,headingDeg,col){
 }
 
 /* ============================================================
-   Coordinate conversion (no rotation for ASD)
+   Projection — port of vatSys ASDControlDX
+   Stereographic about the screen centre (ConvertLLToScreen /
+   ConvertScreenToLL), zoomed so the range spans the window width
+   (SetZoom / CalculateZoom). centerLat/centerLon are the SCREEN
+   centre: panning and zooming move them, as vatSys does.
    ============================================================ */
-const NM_TO_DEG_LAT=1/60;
-function nmToDegLon(lat){return 1/(60*Math.cos(lat*Math.PI/180));}
-function latLonToCanvas(lat,lon){
-  let dlat=lat-centerLat,dlon=lon-centerLon;
-  let xNm=dlon/nmToDegLon(centerLat),yNm=dlat/NM_TO_DEG_LAT;
-  // vatSys SetZoom: DefaultRange spans the full window WIDTH in NM
-  let scale=W/nmRange;
-  return[W/2+panX+xNm*scale,H/2+panY-yNm*scale];
-}
+const D2R=Math.PI/180;
+const MIN_RANGE=10,MAX_RANGE=9999; // MMI.MinimumASDRange / MaximumASDRange for the ASD
 function viewRotationRad(){return 0;}
+function clampRange(r){return Math.max(MIN_RANGE,Math.min(MAX_RANGE,r));}
+
+let pj={};
+function proj(){
+  let rot=viewRotationRad();
+  if(pj.lat!==centerLat||pj.lon!==centerLon||pj.range!==nmRange||pj.W!==W||pj.rot!==rot){
+    let la=centerLat*D2R;
+    // The point range/2 NM due east of the centre lands on the right-hand edge.
+    // 1 NM = 1 arc minute, as in Conversions.CalculateLLFromBearingRange.
+    let c=nmRange/2*Math.PI/10800;
+    pj={lat:centerLat,lon:centerLon,range:nmRange,W:W,rot:rot,
+        sin0:Math.sin(la),cos0:Math.cos(la),
+        scale:(W/2)/(2*Math.tan(c/2)),
+        cr:Math.cos(rot),sr:Math.sin(rot)};
+  }
+  return pj;
+}
+function latLonToCanvas(lat,lon){
+  let p=proj(),la=lat*D2R,dl=(lon-centerLon)*D2R;
+  let sl=Math.sin(la),cl=Math.cos(la),cd=Math.cos(dl);
+  let k=2/(1+p.sin0*sl+p.cos0*cl*cd)*p.scale;
+  let x=k*cl*Math.sin(dl),y=-k*(p.cos0*sl-p.sin0*cl*cd);
+  return[W/2+x*p.cr-y*p.sr,H/2+x*p.sr+y*p.cr];
+}
+function canvasToLatLon(px,py){
+  let p=proj(),dx=px-W/2,dy=py-H/2;
+  let x=(dx*p.cr+dy*p.sr)/p.scale,y=(dx*p.sr-dy*p.cr)/p.scale;
+  let rho=Math.hypot(x,y);
+  if(rho===0) return[centerLat,centerLon];
+  let c=2*Math.atan(rho/2),sc=Math.sin(c),cc=Math.cos(c);
+  let lat=Math.asin(Math.max(-1,Math.min(1,cc*p.sin0+y*sc*p.cos0/rho)));
+  let lon=centerLon*D2R+Math.atan2(x*sc,rho*p.cos0*cc-y*p.sin0*sc);
+  return[lat/D2R,((lon/D2R+540)%360)-180];
+}
+// Angle of true north at a point, for rotate-to-track symbols
+// (CalculateStereographicNorthCorrection)
+function northCorrection(lat,lon){
+  if(Math.abs(centerLat)===90) return 0;
+  let p=proj(),la=lat*D2R,dl=(lon-centerLon)*D2R;
+  let sl=Math.sin(la),cl=Math.cos(la),cd=Math.cos(dl);
+  let y=2/(1+p.sin0*sl+p.cos0*cl*cd)*(p.cos0*sl-p.sin0*cl*cd);
+  let v=Math.PI/2-Math.acos((-2*Math.tan(centerLat*D2R)-y)/(2/(p.cos0*Math.sin(dl))));
+  return isFinite(v)?v:0;
+}
+// Great-circle point at a bearing and range (Conversions.CalculateLLFromBearingRange)
+function fromBearingRange(lat,lon,distNm,bearingDeg){
+  let la=lat*D2R,b=bearingDeg*D2R,d=distNm*Math.PI/10800;
+  let la2=Math.asin(Math.sin(la)*Math.cos(d)+Math.cos(la)*Math.sin(d)*Math.cos(b));
+  let dlo=Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(la),Math.cos(d)-Math.sin(la)*Math.sin(la2));
+  return[la2/D2R,((lon+dlo/D2R+540)%360)-180];
+}
+
+// Move the screen centre so that lat/lon ll sits under canvas point (px,py)
+function anchorAt(ll,px,py){
+  if(!(proj().scale>0)) return;
+  for(let i=0;i<3;i++){
+    let p=latLonToCanvas(ll[0],ll[1]);
+    let c=canvasToLatLon(W/2+p[0]-px,H/2+p[1]-py);
+    if(!isFinite(c[0])||!isFinite(c[1])) return;
+    centerLat=Math.max(-89,Math.min(89,c[0]));centerLon=c[1];
+  }
+}
+// The view a double-tap returns to: the selected position's default centre and range
+let home={lat:centerLat,lon:centerLon,range:nmRange};
+function resetView(){centerLat=home.lat;centerLon=home.lon;nmRange=clampRange(home.range);}
+function setHome(lat,lon,range){home={lat:lat,lon:lon,range:range};resetView();}
 
 /* ============================================================
    Colours
@@ -236,18 +298,6 @@ function mapTypeColour(type,customColour){
   return rgb(colours.PrimaryMap);
 }
 
-function trackColour(ac){
-  // Matches ASDControlDX.SelectASDBrush HMI state switch (note: Preactive
-  // tracks paint in the NonJurisdiction colour on the ASD)
-  if(!colours) return'rgb(0,0,0)';
-  let st=(ac.State||'').toLowerCase();
-  if(st==='jurisdiction') return rgb(colours.Jurisdiction);
-  if(st==='ghostjurisdiction') return rgb(colours.GhostJurisdiction||colours.Jurisdiction);
-  if(st==='announced') return rgb(colours.Announced);
-  if(st==='handoverin'||st==='handoverout') return rgb(colours.Handover);
-  if(st==='postjurisdiction') return rgb(colours.PostJurisdiction||colours.Jurisdiction);
-  return rgb(colours.NonJurisdiction);
-}
 
 /* ============================================================
    Layer key
@@ -321,13 +371,13 @@ function render(){
   }
   visibleLayers.sort((a,b)=>(b.layer.Priority||0)-(a.layer.Priority||0));
 
-  // Controlled-sector infill ('Dynamic Infill') paints beneath the file maps;
-  // active restricted areas (yellow PRD outlines + hatched infills) paint on top
-  for(let dl of dynamicLayers) if(dl.Name==='Dynamic Infill') drawMapLayer(dl);
+  // vatSys paint order: controlled-sector infill and active restricted-area
+  // infills beneath the file maps, restricted-area outlines on top of them
+  for(let dl of dynamicBelow) drawMapLayer(dl);
   for(let ls of visibleLayers) drawMapLayer(ls.layer);
-  for(let dl of dynamicLayers) if(dl.Name!=='Dynamic Infill') drawMapLayer(dl);
+  for(let dl of dynamicAbove) drawMapLayer(dl);
 
-  for(let ac of aircraft) drawAircraft(ac);
+  drawTracks();
 }
 
 function drawMapLayer(layer){
@@ -466,7 +516,7 @@ function drawMapLabels(layer,col){
   ctx.font='bold '+mapFontSize+""px 'Terminus','Consolas',monospace"";
   ctx.textAlign='left';ctx.textBaseline='top';
   ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=1;ctx.setLineDash([]);
-  let cw=ctx.measureText('0').width,fh=mapFontSize;
+  let cw=mapFontW||ctx.measureText('0').width,fh=mapFontH||mapFontSize;
   let placed=[];
   for(let lb of layer.Labels){
     let p=latLonToCanvas(lb.Lat,lb.Lon);
@@ -502,21 +552,33 @@ function drawMapLabels(layer,col){
 }
 
 /* ============================================================
-   Aircraft rendering — ASD style
-   Symbol: triangle for most, stroked (outline).
-   Velocity vector: line in heading direction.
-   Label: Quicktag format (ACID / ALT GS).
-   Leader line from symbol to label.
-   History dots at past positions.
+   Tracks
+   The server makes every decision vatSys's PaintGroundTracks,
+   PaintASDTrack and PaintLabel make — which symbols, what colour,
+   which label cells — from vatSys's own state and the profile's
+   label definitions. This only projects the position and draws.
    ============================================================ */
 const LABEL_DIR_DEFAULT=1,LABEL_LEN_DEFAULT=1;
+// Label positions moved on this page: track id -> {dir, len}. Until a label is
+// moved here, the position set in vatSys is used.
 let labelState={};
-let labelMovingCS=null;
+let labelMovingCS=null; // id of the track whose label is being moved
 let labelMovePreview=null;
+// Label character cell (ASDControlDX MainFontWidth / MainFontHeight)
+let labelFontW=0,labelFontH=0;
 
-function getLabelDir(cs){return labelState[cs]?labelState[cs].dir:LABEL_DIR_DEFAULT;}
-function getLabelLen(cs){return labelState[cs]?labelState[cs].len:LABEL_LEN_DEFAULT;}
+// vatSys FlashShareTimer: the flash phase flips every 600 ms and the
+// timeshare phase every fourth tick
+let flashOn=true,timeshareOn=false,flashCount=0;
+setInterval(()=>{
+  flashOn=flashCount%2===0;
+  if(++flashCount>=4){flashCount=0;timeshareOn=!timeshareOn;}
+  let animated=aircraft.some(a=>(a.Label&&(a.Label.Blink||a.Label.Shared))||(a.Syms||[]).some(s=>s.Ident));
+  if(animated) scheduleRender();
+},600);
 
+// vatSys GetLabelOrientation — direction (0-15) and leader length (0-2)
+// from the track's screen position to the pointer
 function getLabelOrientation(tx,ty,mx,my){
   let dy=my-ty,dx=mx-tx;
   if(dx===0&&dy===0) return[LABEL_DIR_DEFAULT,LABEL_LEN_DEFAULT]; // pointer exactly on the track
@@ -530,146 +592,124 @@ function getLabelOrientation(tx,ty,mx,my){
   return[dir,len];
 }
 
-const RT_PRI=1,RT_MODEC=2,RT_MODES=4,RT_ADSB=8,RT_SMRADSB=32;
-
-/* Label item text — exact vatSys PaintLabel formats */
-// ACID: FDR callsign when coupled; uncoupled ADS-B sources broadcast the
-// callsign, SSR-only uncoupled tracks show the squawk (4-digit octal)
-function acidText(ac){
-  if(ac.Coupled) return ac.Callsign||'';
-  let flags=ac.RadarFlags||0;
-  if(flags&(RT_ADSB|RT_SMRADSB)) return ac.Callsign||'';
-  if((flags&(RT_MODEC|RT_MODES))&&ac.Ssr!=null&&ac.Ssr>=0)
-    return ac.Ssr.toString(8).padStart(4,'0');
-  return ac.Callsign||'';
-}
-// LEVEL: CorrectedAltitude/100 as D3 (integer truncation, like C#)
-function levelText(alt){
-  return alt!=null&&alt>=0?String(Math.trunc(alt/100)).padStart(3,'0'):'';
-}
-// GROUNDSPEED: '++' outside 0..995, else round(gs/10) 2-padded
-function gsText(gs){
-  if(gs==null) return'';
-  return (gs>995||gs<0)?'++':String(Math.round(gs/10)).padStart(2,'0');
+// The Air window paints tracks grouped by HMI state: every symbol of a
+// group, then its labels. The Ground window (no State) paints each track's
+// symbol and label together.
+function drawTracks(){
+  let groups=new Map();
+  for(let ac of aircraft){
+    if(ac.State==null){drawTrackSymbols(ac);drawTrackLabel(ac);continue;}
+    if(!groups.has(ac.State)) groups.set(ac.State,[]);
+    groups.get(ac.State).push(ac);
+  }
+  for(let list of groups.values()){
+    for(let ac of list) drawTrackSymbols(ac);
+    for(let ac of list) drawTrackLabel(ac);
+  }
 }
 
-function drawAircraft(ac){
+function drawTrackSymbols(ac){
   let p=latLonToCanvas(ac.Lat,ac.Lon);
-  let col=trackColour(ac);
-  let flags=ac.RadarFlags||0;
-  let ssr=ac.Ssr!=null?ac.Ssr:-1;
+  ac._p=p;
+  // Ground: a track whose position is outside the window is not painted at all
+  ac._hidden=!!ac.Clip&&(p[0]<0||p[1]<0||p[0]>=W||p[1]>=H);
+  if(ac._hidden) return;
+  let col=rgb(ac.Col);
 
-  // History trail: HistoryMarker symbol at past positions
-  if(ac.History&&ac.History.length>0){
+  // History trail
+  if(ac.History){
     for(let h of ac.History){
       let hp=latLonToCanvas(h[0],h[1]);
-      drawSymbol('HistoryMarker',-1,hp[0],hp[1],null,col);
+      drawSymbol('HistoryMarker',ac.HistSsr,hp[0],hp[1],h[2],col,h[0],h[1]);
     }
   }
 
-  // Velocity vector — exact PaintASDTrack algorithm: segments of min(5,VV)
-  // minutes along the track heading, VelocityMarker at intermediate points
-  if(vvMinutes>0&&ac.Gs>0&&ac.Hdg!==-1){
-    let segMin=Math.min(5,vvMinutes);
+  // Velocity vector: 1-minute segments (5-minute once the setting is above 5),
+  // each a great-circle step along the track, a VelocityMarker between them
+  if(ac.Vv>0){
+    let segMin=ac.Vv>5?5:1;
     let segNm=ac.Gs/60*segMin;
-    let hdgRad=ac.Hdg*Math.PI/180;
-    let cosH=Math.cos(hdgRad),sinH=Math.sin(hdgRad);
-    let prevLat=ac.Lat,prevLon=ac.Lon,prev=p;
-    ctx.strokeStyle=col;ctx.lineWidth=1;
-    for(let m=segMin;m<=vvMinutes;m+=segMin){
-      let nLat=prevLat+cosH*segNm/60;
-      let nLon=prevLon+sinH*segNm/(60*Math.cos(prevLat*Math.PI/180));
-      let np=latLonToCanvas(nLat,nLon);
+    let ll=[ac.Lat,ac.Lon],prev=p;
+    ctx.strokeStyle=col;ctx.lineWidth=1;ctx.setLineDash([]);
+    for(let m=segMin;m<=ac.Vv;m+=segMin){
+      ll=fromBearingRange(ll[0],ll[1],segNm,ac.Trk);
+      let np=latLonToCanvas(ll[0],ll[1]);
       ctx.beginPath();ctx.moveTo(prev[0],prev[1]);ctx.lineTo(np[0],np[1]);ctx.stroke();
-      if(m<vvMinutes) drawSymbol('VelocityMarker',-1,np[0],np[1],null,col);
-      prevLat=nLat;prevLon=nLon;prev=np;
+      if(m<ac.Vv) drawSymbol('VelocityMarker',ac.HistSsr,np[0],np[1],ac.Trk,col,ll[0],ll[1]);
+      prev=np;
     }
   }
 
-  // Symbol selection — exact port of vatSys PaintASDTrack:
-  // ModeS(4) → ModeS, else ModeC(2) → ModeA, else ADSB(8) → ADSB.
-  // Coasting → CoastADSB/CoastRadar. Identing symbols blink in IdentFlash.
-  // A PRI return overlays the Primary cross on the SSR symbol.
-  let ssrSym=null;
-  if(flags&RT_MODES) ssrSym='ModeS';
-  else if(flags&RT_MODEC) ssrSym='ModeA';
-  else if(flags&RT_ADSB) ssrSym='ADSB';
-
-  if(ac.Coasting){
-    drawSymbol(ssrSym==='ADSB'?'CoastADSB':'CoastRadar',ssr,p[0],p[1],ac.Hdg,col);
-  }else if(ssrSym){
-    if(!ac.Ident||flashOn){
-      let symCol=ac.Ident?(colours&&colours.IdentFlash?rgb(colours.IdentFlash):'#fff'):col;
-      drawSymbol(ssrSym,ssr,p[0],p[1],ac.Hdg,symCol);
-      if(flags&RT_PRI) drawSymbol('Primary',ssr,p[0],p[1],ac.Hdg,symCol);
-    }
-  }else if(flags&RT_PRI){
-    drawSymbol('Primary',-1,p[0],p[1],ac.Hdg,col);
+  // Symbols; an identing symbol is painted only on the flash phase
+  for(let s of (ac.Syms||[])){
+    if(s.Ident&&!flashOn) continue;
+    drawSymbol(s.Type,s.Ssr,p[0],p[1],s.Hdg,s.Col?rgb(s.Col):col,ac.Lat,ac.Lon);
   }
 
-  // Selection octagon on the track being label-moved (vatSys Selection symbol)
-  let cs=ac.Callsign||'';
-  if(labelMovingCS===cs) drawSymbol('Selection',-1,p[0],p[1],null,col);
+  // This page's own marker for the track whose label is being moved
+  if(labelMovingCS===ac.Id) drawSymbol('Selection',-1,p[0],p[1],null,col);
+}
 
-  // Label content — vatSys label templates: coupled tracks get the Normal
-  // label (RWY / ACID WAKE / LEVEL VI CFL GS), uncoupled tracks get the
-  // Limited label (ACID / LEVEL as FLnnn above transition, 5-digit feet below)
-  let lines=[];
-  if(ac.Coupled){
-    if(ac.Runway) lines.push(ac.Runway);
-    let l2=ac.Callsign||'';
-    if(ac.WakeCat) l2+=(l2?' ':'')+ac.WakeCat;
-    if(l2) lines.push(l2);
-    let l3=levelText(ac.Alt);
-    // vertical indicator: vatSys Terminus glyphs (® climb / ¬ descend /
-    // '>' level, threshold 300fpm), suppressed while coasting
-    if(!ac.Coasting){
-      if(ac.VSpd>300) l3+='®';
-      else if(ac.VSpd<-300) l3+='¬';
-      else l3+='>';
-    }
-    // CFL: 3-digit, 'VSA' for the visual-approach sentinel (2), hidden when -1
-    if(ac.CFL!=null&&ac.CFL!==-1)
-      l3+=(ac.CFL===2?'VSA':String(Math.trunc(ac.CFL/100)).padStart(3,'0'));
-    let g=gsText(ac.Gs);
-    if(g) l3+=(l3?' ':'')+g;
-    if(l3) lines.push(l3);
-  }else{
-    let a=acidText(ac);
-    if(a) lines.push(a);
-    if(ac.Alt!=null&&ac.Alt>=0){
-      lines.push(ac.Alt>transAlt
-        ?'FL'+String(Math.trunc(ac.Alt/100)).padStart(3,'0')
-        :String(ac.Alt).padStart(5,'0'));
-    }
-  }
-  if(lines.length===0) return;
+// Port of the layout half of PaintLabel: a box of Width x Rows character
+// cells hung off the leader end, each line's cells placed by GetItemRectF.
+function drawTrackLabel(ac){
+  let lb=ac.Label;
+  if(!lb||ac._hidden) return;
+  if(lb.Blink&&flashOn) return; // handover-in / post-jurisdiction labels blink
+  let p=ac._p||latLonToCanvas(ac.Lat,ac.Lon);
 
-  let ldir=getLabelDir(cs);
-  let llen=getLabelLen(cs);
+  let st=labelState[ac.Id];
+  let dir=st?st.dir:lb.Dir,len=st?st.len:lb.Len;
+  if(labelMovingCS===ac.Id&&labelMovePreview){dir=labelMovePreview[0];len=labelMovePreview[1];}
 
-  if(labelMovingCS===cs&&labelMovePreview){
-    ldir=labelMovePreview[0];llen=labelMovePreview[1];
-  }
+  let fw=labelFontW||Math.round(labelFontSize/2),fh=labelFontH||labelFontSize;
+  // CalculateLabelLocation: whole pixels, measured from the window centre
+  let reach=len*35+5,ang=dir*22.5*D2R;
+  let lx=W/2+Math.trunc(p[0]-W/2+reach*Math.cos(ang));
+  let ly=H/2+Math.trunc(p[1]-H/2+reach*Math.sin(ang));
+  let west=dir>4&&dir<12;
+  let bw=lb.Width*fw,bh=lb.Rows*fh;
+  let bx=lx-(west?bw:0),by=ly-lb.AnchorRow*fh;
+  if(bx>W||bx+bw<0||by>H||by+bh<0) return; // label box outside the window
 
-  let lAngle=ldir*22.5;
-  let leaderPx=llen*35+5;
-  let rad=lAngle*Math.PI/180;
-  let lx=p[0]+leaderPx*Math.cos(rad),ly=p[1]+leaderPx*Math.sin(rad);
-
-  // Leader line
-  ctx.strokeStyle=col;ctx.lineWidth=1;
+  ctx.setLineDash([]);ctx.lineWidth=1;
+  ctx.strokeStyle=rgb(lb.Col);
   ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(lx,ly);ctx.stroke();
 
-  // Label — ASDMainFont (default eurofont_sml = 18px Terminus bold)
-  ctx.fillStyle=col;
   ctx.font='bold '+labelFontSize+""px 'Terminus','Consolas',monospace"";
-  let fontH=labelFontSize;
-  let isWest=ldir>4&&ldir<12;
-  ctx.textAlign=isWest?'right':'left';
-  ctx.textBaseline='top';
+  ctx.textAlign='left';ctx.textBaseline='middle';
+  let lines=(lb.Shared&&timeshareOn)?lb.Shared:lb.Lines;
+  for(let i=0;i<lines.length;i++){
+    let line=lines[i],y=by+i*fh;
+    for(let cell of line.Cells){
+      let cw=cell.W*fw;
+      let cx=(line.J&&west)?(bx+bw-cell.X*fw-cw):(bx+cell.X*fw);
+      if(west&&cx+cw>bx+bw) cx=bx+bw-cw;
+      if(cell.Back){ctx.fillStyle=rgb(cell.Back);ctx.fillRect(cx,y,cw,fh);}
+      for(let run of cell.Runs){
+        let rx=cx+Math.trunc(run.Dx*fw)+run.Px,ry=y+run.Dy*fh;
+        // DrawCharacters: one character per cell, centred vertically in the row
+        ctx.fillStyle=rgb(run.C);
+        for(let k=0;k<run.T.length;k++) ctx.fillText(run.T[k],rx+k*fw,ry-1+fh/2);
+        if(run.B){
+          let tw=run.T.length*fw;
+          ctx.strokeStyle=rgb(run.BC||run.C);
+          ctx.beginPath();
+          if(run.B&1){ctx.moveTo(rx,ry);ctx.lineTo(rx,ry+fh);}
+          if(run.B&2){ctx.moveTo(rx+tw,ry);ctx.lineTo(rx+tw,ry+fh);}
+          if(run.B&4){ctx.moveTo(rx,ry);ctx.lineTo(rx+tw,ry);}
+          if(run.B&8){ctx.moveTo(rx,ry+fh);ctx.lineTo(rx+tw,ry+fh);}
+          ctx.stroke();
+        }
+      }
+    }
+  }
 
-  for(let i=0;i<lines.length;i++) ctx.fillText(lines[i],lx,ly+i*fontH);
+  // Alert box around the label
+  if(lb.Box){
+    ctx.strokeStyle=rgb(lb.Box);
+    ctx.strokeRect(bx-1,by,lb.BoxWidth*fw+2,bh);
+  }
 }
 
 /* ============================================================
@@ -693,7 +733,7 @@ cv.addEventListener('pointerup',e=>{
   let ux=e.clientX-rect.left,uy=e.clientY-rect.top;
 
   if(labelMovingCS){
-    let ac=aircraft.find(a=>(a.Callsign||'')===labelMovingCS);
+    let ac=aircraft.find(a=>a.Id===labelMovingCS);
     if(ac){
       let p=latLonToCanvas(ac.Lat,ac.Lon);
       let ori=getLabelOrientation(p[0],p[1],ux,uy);
@@ -710,8 +750,8 @@ cv.addEventListener('pointerup',e=>{
     let dx=Math.abs(e.clientX-tapStartPos.x),dy=Math.abs(e.clientY-tapStartPos.y);
     if(dx<6&&dy<6){
       let ac=findAircraftAt(ux,uy);
-      if(ac&&ac.Callsign){
-        labelMovingCS=ac.Callsign;
+      if(ac&&ac.Id){
+        labelMovingCS=ac.Id;
         labelMovePreview=null;
         scheduleRender();
       }
@@ -734,65 +774,63 @@ window.addEventListener('resize',resize);
 
 /* ============================================================
    Touch / Mouse - pan, pinch-zoom, scroll-zoom
+   Panning and zooming move the screen centre, keeping the point
+   under the finger or cursor where it is.
    ============================================================ */
 let pointers=new Map(),panLast=null,pinchLast=null;
+function canvasPoint(x,y){let r=cv.getBoundingClientRect();return[x-r.left,y-r.top];}
 cv.addEventListener('pointerdown',e=>{
   cv.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
   tapStartPos={x:e.clientX,y:e.clientY};
-  if(labelMovingCS){pinchLast=null;panLast=null;return;}
+  if(labelMovingCS){pinchLast=null;panLast=null;return;} // suppress pan during label move
   if(pointers.size===1){panLast={x:e.clientX,y:e.clientY};pinchLast=null;}
   else if(pointers.size===2){panLast=null;let pts=[...pointers.values()];pinchLast={dist:Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y),mx:(pts[0].x+pts[1].x)/2,my:(pts[0].y+pts[1].y)/2};}
 });
 cv.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  // Label move preview
   if(labelMovingCS&&pointers.size===1){
-    let rect=cv.getBoundingClientRect();
-    let mx=e.clientX-rect.left,my=e.clientY-rect.top;
-    let ac=aircraft.find(a=>(a.Callsign||'')===labelMovingCS);
-    if(ac){let p=latLonToCanvas(ac.Lat,ac.Lon);labelMovePreview=getLabelOrientation(p[0],p[1],mx,my);scheduleRender();}
+    let m=canvasPoint(e.clientX,e.clientY);
+    let ac=aircraft.find(a=>a.Id===labelMovingCS);
+    if(ac){let p=latLonToCanvas(ac.Lat,ac.Lon);labelMovePreview=getLabelOrientation(p[0],p[1],m[0],m[1]);scheduleRender();}
     return;
   }
   if(pointers.size===1&&panLast){
     let pt=[...pointers.values()][0];
-    panX+=pt.x-panLast.x;panY+=pt.y-panLast.y;
+    let from=canvasPoint(panLast.x,panLast.y),to=canvasPoint(pt.x,pt.y);
+    anchorAt(canvasToLatLon(from[0],from[1]),to[0],to[1]);
     panLast={x:pt.x,y:pt.y};scheduleRender();
   }else if(pointers.size===2&&pinchLast){
     let pts=[...pointers.values()];
     let dist=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);
     let mx=(pts[0].x+pts[1].x)/2,my=(pts[0].y+pts[1].y)/2;
-    if(pinchLast.dist>10){
-      let sf=pinchLast.dist/dist;
-      let rect=cv.getBoundingClientRect();
-      let cx=pinchLast.mx-rect.left-W/2,cy=pinchLast.my-rect.top-H/2;
-      panX=cx+(panX-cx)/sf+(mx-pinchLast.mx);
-      panY=cy+(panY-cy)/sf+(my-pinchLast.my);
-      nmRange*=sf;nmRange=Math.max(1,Math.min(5000,nmRange));
+    if(pinchLast.dist>10&&dist>0){
+      let from=canvasPoint(pinchLast.mx,pinchLast.my),to=canvasPoint(mx,my);
+      let ll=canvasToLatLon(from[0],from[1]);
+      nmRange=clampRange(nmRange*pinchLast.dist/dist);
+      anchorAt(ll,to[0],to[1]);
     }
     pinchLast={dist:dist,mx:mx,my:my};scheduleRender();
   }
 });
-cv.addEventListener('pointerup',e=>{
+function pointerGone(e){
   pointers.delete(e.pointerId);
   if(pointers.size===1){let pt=[...pointers.values()][0];panLast={x:pt.x,y:pt.y};pinchLast=null;}
   else if(pointers.size===0){panLast=null;pinchLast=null;}
-});
-cv.addEventListener('pointercancel',e=>{
-  pointers.delete(e.pointerId);
-  if(pointers.size===1){let pt=[...pointers.values()][0];panLast={x:pt.x,y:pt.y};pinchLast=null;}
-  else if(pointers.size===0){panLast=null;pinchLast=null;}
-});
+}
+cv.addEventListener('pointerup',pointerGone);
+cv.addEventListener('pointercancel',pointerGone);
 cv.addEventListener('wheel',e=>{
   e.preventDefault();
-  let sf=e.deltaY>0?1.15:0.87;
-  let rect=cv.getBoundingClientRect();
-  let cx=e.clientX-rect.left-W/2,cy=e.clientY-rect.top-H/2;
-  panX=cx+(panX-cx)/sf;panY=cy+(panY-cy)/sf;
-  nmRange*=sf;nmRange=Math.max(1,Math.min(5000,nmRange));
+  let m=canvasPoint(e.clientX,e.clientY);
+  let ll=canvasToLatLon(m[0],m[1]);
+  nmRange=clampRange(nmRange*(e.deltaY>0?1.15:0.87));
+  anchorAt(ll,m[0],m[1]);
   scheduleRender();
 },{passive:false});
-cv.addEventListener('dblclick',e=>{e.preventDefault();panX=0;panY=0;if(selectedPos)nmRange=selectedPos.DefaultRange||200;labelMovingCS=null;labelMovePreview=null;scheduleRender();});
+cv.addEventListener('dblclick',e=>{e.preventDefault();resetView();labelMovingCS=null;labelMovePreview=null;scheduleRender();});
 
 /* ============================================================
    Menu system
@@ -944,7 +982,7 @@ function toggleMapLayer(key,meta,chkEl){
   chkEl.textContent=ls.visible?'\u2713':'';
   // Centre on map's own center when enabling, if no position selected
   if(ls.visible&&!selectedPos&&meta.CenterLat&&meta.CenterLon){
-    centerLat=meta.CenterLat;centerLon=meta.CenterLon;panX=0;panY=0;
+    setHome(meta.CenterLat,meta.CenterLon,nmRange);
   }
   if(ls.visible&&!ls.layer){
     loadLayerGeometry(key).then(()=>scheduleRender());
@@ -988,16 +1026,13 @@ function selectPosition(pos){
   if(!pos){
     document.title='ASD';
     for(let k in layerState) layerState[k].visible=false;
-    centerLat=-27;centerLon=153;nmRange=200;panX=0;panY=0;
+    setHome(-27,153,200);
     buildPositionMenu();buildMapsMenu();render();
     return;
   }
 
   document.title='ASD: '+pos.Name;
-  centerLat=pos.CenterLat;
-  centerLon=pos.CenterLon;
-  nmRange=pos.DefaultRange||200;
-  panX=0;panY=0;
+  setHome(pos.CenterLat,pos.CenterLon,pos.DefaultRange||200);
 
   for(let k in layerState) layerState[k].visible=false;
   let checkedKeys=[];
@@ -1048,8 +1083,6 @@ function loadAsdMaps(){
   api('/api/asd/maps').then(data=>{
     allAsdMaps=data.Maps||[];
     colours=data.Colours||null;
-    vvMinutes=data.VelocityVectors||0;
-    if(data.TransitionAltitude) transAlt=data.TransitionAltitude;
     applyTheme();
     buildHatch();
     for(let m of allAsdMaps){
@@ -1068,41 +1101,32 @@ function loadSymbols(){
     if(data.Symbols&&data.Symbols.length>0) buildSymTable(data.Symbols);
     if(data.LabelFontSize) labelFontSize=data.LabelFontSize;
     if(data.MapFontSize) mapFontSize=data.MapFontSize;
+    labelFontW=data.LabelFontWidth||0;labelFontH=data.LabelFontHeight||0;
+    mapFontW=data.MapFontWidth||0;mapFontH=data.MapFontHeight||0;
     scheduleRender();
   }).catch(()=>{});
 }
 
 // Runtime dynamic maps: controlled-sector infill and active restricted areas
 // (yellow PRD outlines). These change as sectors are taken/released, so refresh
-// periodically.
+// every 2 seconds.
 function loadDynamicMaps(){
   api('/api/asd/dynamicmaps').then(data=>{
-    dynamicLayers=Array.isArray(data)?data:[];
+    dynamicBelow=data&&Array.isArray(data.Below)?data.Below:[];
+    dynamicAbove=data&&Array.isArray(data.Above)?data.Above:[];
     scheduleRender();
   }).catch(()=>{});
-}
-
-// Ident flash — vatSys blinks identing symbols on the render flash cycle
-function updateFlashTimer(){
-  let anyIdent=aircraft.some(a=>a.Ident);
-  if(anyIdent&&!flashTimer){
-    flashTimer=setInterval(()=>{flashOn=!flashOn;scheduleRender();},500);
-  }else if(!anyIdent&&flashTimer){
-    clearInterval(flashTimer);flashTimer=null;flashOn=true;
-  }
 }
 
 function startAircraftPolling(){
   if(acTimer){clearInterval(acTimer);acTimer=null;}
   function poll(){
-    // Query around the actual view centre (pan offset included) with a range
-    // covering the whole viewport, so tracks never vanish when zooming/panning
-    let scale=W/nmRange;
-    let vLat=centerLat+(panY/scale)*NM_TO_DEG_LAT;
-    let vLon=centerLon-(panX/scale)*nmToDegLon(centerLat);
+    // Query around the screen centre with a range covering the whole viewport,
+    // so tracks never vanish when zooming/panning
+    if(!(W>0)) return; // not laid out yet (hidden tab)
     let rng=Math.ceil(nmRange*0.5*Math.max(1,H/W)*1.3)+5;
-    api('/api/asd/aircraft?lat='+vLat.toFixed(5)+'&lon='+vLon.toFixed(5)+'&range='+rng).then(data=>{
-      aircraft=Array.isArray(data)?data:[];updateFlashTimer();scheduleRender();
+    api('/api/asd/aircraft?lat='+centerLat.toFixed(5)+'&lon='+centerLon.toFixed(5)+'&range='+rng).then(data=>{
+      aircraft=Array.isArray(data)?data:[];scheduleRender();
     }).catch(()=>{});
   }
   poll();
@@ -1115,7 +1139,7 @@ loadPositions();
 loadAsdMaps();
 loadSymbols();
 loadDynamicMaps();
-setInterval(loadDynamicMaps,5000);
+setInterval(loadDynamicMaps,2000);
 </script>
 </body>
 </html>";

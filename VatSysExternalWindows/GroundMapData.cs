@@ -47,6 +47,8 @@ public static class GroundMapData
         public int[] GenericText { get; set; } = { 96, 0, 0 };
         public int[] Release { get; set; } = { 52, 59, 198 };
         public int[] Crossing { get; set; } = { 255, 0, 0 };
+        /// <summary>Active restricted-area outlines, which vatSys also paints on the Ground window.</summary>
+        public int[] PRDArea { get; set; } = { 100, 100, 100 };
         /// <summary>All Custom colours from Colours.xml by name — vatSys resolves any
         /// map CustomColourName via Colours.GetCustomColorDX.</summary>
         public Dictionary<string, int[]> CustomColours { get; set; } = new();
@@ -173,6 +175,7 @@ public static class GroundMapData
                     case "WindowButtonSelected": colours.SelectedButton = rgb; break;
                     case "InteractiveText": colours.InteractiveText = rgb; break;
                     case "GenericText": colours.GenericText = rgb; break;
+                    case "PRDArea": colours.PRDArea = rgb; break;
                     case "Custom":
                         var name = elem.Element("Name")?.Value ?? "";
                         if (string.IsNullOrWhiteSpace(name)) break;

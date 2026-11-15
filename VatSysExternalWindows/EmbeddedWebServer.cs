@@ -175,14 +175,18 @@ public sealed class EmbeddedWebServer : IDisposable
             case "/api/groundmaps":
                 return Json(200, new { Maps = _data.GetGroundMaps(), Colours = _data.GetColours() });
 
-            // Tracks.xml symbol geometry + current font sizes (shared by both windows)
+            // Tracks.xml symbol geometry + the font cell sizes vatSys lays text out with
+            // (shared by both windows)
             case "/api/symbols":
+            {
+                var fonts = TrackPainter.GetFontMetrics();
                 return Json(200, new
                 {
                     Symbols = _data.GetTrackSymbols(),
-                    LabelFontSize = _data.GetLabelFontSize(),
-                    MapFontSize = _data.GetMapFontSize(),
+                    fonts.LabelFontSize, fonts.LabelFontWidth, fonts.LabelFontHeight,
+                    fonts.MapFontSize, fonts.MapFontWidth, fonts.MapFontHeight,
                 });
+            }
 
             // Geometry for specific map layers (on demand)
             case "/api/maplayers":
@@ -193,21 +197,21 @@ public sealed class EmbeddedWebServer : IDisposable
                     : Json(200, _data.GetMapLayers(keys));
             }
 
-            // Live aircraft around an airport; range = how far the client's view reaches
+            // Live aircraft for a Ground window: lat/lon = the client's screen centre,
+            // range = how far its view reaches (all optional)
             case "/api/aircraft":
             {
                 if (!req.Query.TryGetValue("icao", out var icao) || string.IsNullOrWhiteSpace(icao))
                     return Json(400, new { Error = "icao required." });
 
-                double? range = null;
-                if (req.Query.TryGetValue("range", out var rangeText))
+                if (!TryParseOptional(req, "lat", out var lat) ||
+                    !TryParseOptional(req, "lon", out var lon) ||
+                    !TryParseOptional(req, "range", out var range))
                 {
-                    if (!TryParseNumber(rangeText, out var parsed))
-                        return Json(400, new { Error = "Invalid range." });
-                    range = parsed;
+                    return Json(400, new { Error = "Invalid lat/lon/range." });
                 }
 
-                return Json(200, _data.GetAircraft(icao, range));
+                return Json(200, _data.GetAircraft(icao, lat, lon, range));
             }
 
             // Crossing/Release maps currently visible in the vatSys Ground window
@@ -227,11 +231,9 @@ public sealed class EmbeddedWebServer : IDisposable
                 {
                     Maps = _asd.GetAsdMaps(),
                     Colours = _asd.GetColours(),
-                    VelocityVectors = _asd.GetVelocityVectors(),
-                    TransitionAltitude = _asd.GetTransitionAltitude(),
                 });
 
-            // Runtime dynamic maps: controlled-sector infill + active restricted areas
+            // Runtime dynamic maps in vatSys paint order: { Below, Above } the file maps
             case "/api/asd/dynamicmaps":
                 return Json(200, _asd.GetDynamicMaps());
 
@@ -276,6 +278,16 @@ public sealed class EmbeddedWebServer : IDisposable
             .Select(k => k.Trim())
             .Where(k => k.Length > 0)
             .ToList();
+    }
+
+    /// <summary>False only when the parameter is present but not a number.</summary>
+    private static bool TryParseOptional(HttpReq req, string name, out double? value)
+    {
+        value = null;
+        if (!req.Query.TryGetValue(name, out var text)) return true;
+        if (!TryParseNumber(text, out var parsed)) return false;
+        value = parsed;
+        return true;
     }
 
     private static bool TryParseNumber(string text, out double value)

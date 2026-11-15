@@ -64,201 +64,55 @@ public sealed class GroundDataService
         }
     }
 
-    /// <summary>Current ASD label font size in pixels (MMI.ASDMainFont honours the user's setting).</summary>
-    public double GetLabelFontSize()
-    {
-        try { return MMI.ASDMainFont.Size; } catch { return 18; }
-    }
-
-    /// <summary>Current ASD map font size in pixels.</summary>
-    public double GetMapFontSize()
-    {
-        try { return MMI.ASDMapFont.Size; } catch { return 16; }
-    }
-
     /// <summary>Geometry for specific Ground map layers identified by "Folder/Name" keys.</summary>
     public List<MapLayer> GetMapLayers(List<string> mapKeys)
     {
         return MapSource.GetLayers(DisplayMaps.MapCategories.Ground, mapKeys);
     }
 
-    /// <summary>Returns aircraft around the given airport. vatSys paints every track
-    /// inside the Ground window, so the client passes how far its view reaches
-    /// (<paramref name="rangeNm"/> from the position centre); without it a small
-    /// default box around the airport is used.</summary>
-    public List<AircraftDto> GetAircraft(string icao, double? rangeNm = null)
+    /// <summary>Returns the tracks for a Ground window showing <paramref name="icao"/>,
+    /// each as vatSys's PaintGroundTracks would paint it. vatSys paints every track
+    /// inside the window, so the client passes its screen centre and how far its
+    /// view reaches; without them a small default box around the airport's
+    /// position centre is used.</summary>
+    public List<TrackDto> GetAircraft(string icao, double? viewLat = null, double? viewLon = null, double? rangeNm = null)
     {
-        var result = new List<AircraftDto>();
-        var pos = GetPositions().FirstOrDefault(p =>
-            string.Equals(p.Airport, icao, StringComparison.OrdinalIgnoreCase));
-        if (pos is null) return result;
+        var result = new List<TrackDto>();
+
+        double centreLat, centreLon;
+        if (viewLat is double vLat && viewLon is double vLon)
+        {
+            centreLat = vLat;
+            centreLon = vLon;
+        }
+        else
+        {
+            var pos = GetPositions().FirstOrDefault(p =>
+                string.Equals(p.Airport, icao, StringComparison.OrdinalIgnoreCase));
+            if (pos is null) return result;
+            centreLat = pos.CenterLat;
+            centreLon = pos.CenterLon;
+        }
 
         var latDelta = DefaultBoxDegrees;
         var lonDelta = DefaultBoxDegrees;
-        if (rangeNm is double range && range > 0 && !double.IsNaN(range))
+        if (rangeNm is double range && range > 0)
         {
             range = Math.Min(range, MaxRangeNm);
             latDelta = range / 60.0;
-            lonDelta = range / (60.0 * Math.Max(0.01, Math.Cos(pos.CenterLat * Math.PI / 180.0)));
+            lonDelta = range / (60.0 * Math.Max(0.01, Math.Cos(centreLat * Math.PI / 180.0)));
         }
 
         IList<RDP.RadarTrack>? tracks = null;
         try { tracks = RDP.RadarTracks; } catch { }
         if (tracks is null) return result;
 
-        foreach (var track in tracks)
+        foreach (var radarTrack in tracks)
         {
             try
             {
-                if (track.Cancelled) continue;
-
-                // vatSys PaintGroundTracks skips tracks without a network pilot
-                var pilot = track.ActualAircraft;
-                if (pilot is null) continue;
-
-                var coord = track.LatLong;
-                if (coord is null) continue;
-
-                var lat = coord.Latitude;
-                var lon = coord.Longitude;
-                if (double.IsNaN(lat) || double.IsNaN(lon)) continue;
-
-                if (Math.Abs(lat - pos.CenterLat) > latDelta || Math.Abs(lon - pos.CenterLon) > lonDelta)
-                    continue;
-
-                var onGround = false;
-                try { onGround = track.OnGround; } catch { }
-
-                // vatSys rotates ground symbols to the pilot's reported heading (nose
-                // direction — differs from track during pushback) and paints airborne
-                // symbols with the calculated radar track heading.
-                var heading = 0.0;
-                try { heading = onGround ? pilot.Heading : track.Heading; } catch { }
-
-                var groundSpeed = 0.0;
-                try { groundSpeed = track.GroundSpeed; } catch { }
-
-                // Symbol selection inputs (PaintGroundTracks): radar source flags and
-                // squawk code for Tracks.xml SpecialCode symbol variants
-                var radarFlags = 0;
-                try { radarFlags = (int)track.RadarTypes; } catch { }
-                var ssr = -1;
-                try { ssr = pilot.TransponderCode; } catch { }
-
-                // vatSys: ASMGCSCoupledFDR takes precedence over CoupledFDR for ground display
-                FDP2.FDR? fdr = null;
-                try { fdr = track.ASMGCSCoupledFDR ?? track.CoupledFDR; } catch { }
-
-                var callsign = "";
-                try { callsign = fdr?.Callsign ?? ""; } catch { }
-                if (string.IsNullOrEmpty(callsign)) callsign = pilot.Callsign ?? "";
-
-                var category = "unknown";
-                var wakeCat = "";
-                var aircraftType = "";
-                var runway = "";
-                if (fdr is not null)
-                {
-                    try
-                    {
-                        var dep = fdr.DepAirport ?? "";
-                        var arr = fdr.DesAirport ?? "";
-                        if (dep.Equals(icao, StringComparison.OrdinalIgnoreCase))
-                            category = "departure";
-                        else if (arr.Equals(icao, StringComparison.OrdinalIgnoreCase))
-                            category = "arrival";
-                        else
-                            category = "local";
-
-                        try { wakeCat = fdr.AircraftWake ?? ""; } catch { }
-                        try { aircraftType = fdr.AircraftType ?? ""; } catch { }
-                        // vatSys LABEL_ITEM_RWY: departure runway until ATD is set,
-                        // arrival runway once the aircraft has departed
-                        try
-                        {
-                            runway = fdr.ATD != DateTime.MaxValue
-                                ? fdr.ArrivalRunway?.Name ?? ""
-                                : fdr.DepartureRunway?.Name ?? "";
-                        }
-                        catch { }
-                    }
-                    catch { }
-                }
-
-                // vatSys wake fallback for uncoupled/blank wake: performance data for the
-                // pilot's reported type, then engine type (piston → L, turboprop → M).
-                if (string.IsNullOrEmpty(wakeCat))
-                {
-                    try
-                    {
-                        if (!string.IsNullOrEmpty(pilot.AircraftType))
-                            wakeCat = Performance.GetAircraftFromType(pilot.AircraftType)?.WakeCategory ?? "";
-                    }
-                    catch { }
-                }
-                if (string.IsNullOrEmpty(wakeCat))
-                {
-                    try
-                    {
-                        // NetworkPilot.EngineType is from the unreferenced vatSys network
-                        // assembly — read it reflectively.
-                        var engineField = pilot.GetType().GetField("EngineType");
-                        if (engineField is not null)
-                        {
-                            var engine = Convert.ToInt32(engineField.GetValue(pilot));
-                            if (engine == 0) wakeCat = "L";
-                            else if (engine == 1) wakeCat = "M";
-                        }
-                    }
-                    catch { }
-                }
-
-                // Get position history trail dots from vatSys RadarTrack.PositionHistory
-                double[][]? history = null;
-                var maxDots = MMI.HistoryDots; // user setting (0=off, 1-9)
-                try
-                {
-                    if (maxDots > 0)
-                    {
-                        var posHist = track.PositionHistory?.ToArray();
-                        if (posHist is not null && posHist.Length > 0)
-                        {
-                            var dots = new List<double[]>();
-                            // Newest first (iterate backwards), limit to user setting
-                            for (int i = posHist.Length - 1; i >= 0 && dots.Count < maxDots; i--)
-                            {
-                                var h = posHist[i];
-                                if (h?.LatLong is null) continue;
-                                dots.Add(new[] { Math.Round(h.LatLong.Latitude, 7), Math.Round(h.LatLong.Longitude, 7) });
-                            }
-                            if (dots.Count > 0) history = dots.ToArray();
-                        }
-                    }
-                }
-                catch { }
-
-                // Get altitude for GroundAir label
-                var altitude = -1;
-                try { altitude = track.CorrectedAltitude; } catch { }
-
-                result.Add(new AircraftDto
-                {
-                    Callsign = callsign,
-                    Lat = Math.Round(lat, 7),
-                    Lon = Math.Round(lon, 7),
-                    Hdg = Json.Number(heading, 1),
-                    Gs = Json.Number(groundSpeed, 0),
-                    Alt = altitude,
-                    OnGround = onGround,
-                    Category = category,
-                    Coupled = fdr is not null,
-                    RadarFlags = radarFlags,
-                    Ssr = ssr,
-                    WakeCat = wakeCat,
-                    AircraftType = aircraftType,
-                    Runway = runway,
-                    History = history,
-                });
+                var dto = BuildGroundTrack(radarTrack, icao, centreLat, centreLon, latDelta, lonDelta);
+                if (dto is not null) result.Add(dto);
             }
             catch { }
         }
@@ -266,19 +120,139 @@ public sealed class GroundDataService
         return result;
     }
 
+    /// <summary>Port of ASDControlDX.PaintGroundTracks for one radar track.</summary>
+    private static TrackDto? BuildGroundTrack(RDP.RadarTrack radarTrack, string icao,
+        double centreLat, double centreLon, double latDelta, double lonDelta)
+    {
+        // vatSys skips cancelled tracks and tracks without a network pilot
+        var pilot = radarTrack.ActualAircraft;
+        if (radarTrack.Cancelled || pilot is null) return null;
+
+        var coord = radarTrack.LatLong;
+        if (coord is null) return null;
+        var lat = coord.Latitude;
+        var lon = coord.Longitude;
+        if (double.IsNaN(lat) || double.IsNaN(lon)) return null;
+        if (Math.Abs(lat - centreLat) > latDelta || Math.Abs(lon - centreLon) > lonDelta) return null;
+
+        Track? tl = null;
+        try { tl = MMI.FindTrack(radarTrack); } catch { }
+
+        // ASMGCSCoupledFDR takes precedence over CoupledFDR on the ground display
+        var fdr = radarTrack.ASMGCSCoupledFDR ?? radarTrack.CoupledFDR;
+        var colour = TrackPainter.GroundColour(tl, fdr, icao);
+
+        var types = radarTrack.RadarTypes;
+        var ssrAny = (types & (RDP.RadarTypes.SSR_ModeC | RDP.RadarTypes.SSR_ModeS | RDP.RadarTypes.ADSB | RDP.RadarTypes.SMR_ADSB)) != 0;
+        var code = pilot.TransponderCode;
+        // Ground symbols turn to the pilot's reported heading (nose direction);
+        // airborne symbols use the radar track's heading
+        var aircraftHeading = pilot.Heading;
+
+        var dto = new TrackDto
+        {
+            Id = pilot.Callsign ?? "",
+            Lat = Math.Round(lat, 7),
+            Lon = Math.Round(lon, 7),
+            Col = TrackLabelBuilder.Rgb(colour),
+            Clip = true,
+            History = TrackPainter.History(radarTrack),
+            HistSsr = -1,
+        };
+
+        bool hasLabel;
+        if (!radarTrack.OnGround)
+        {
+            if (types.HasFlag(RDP.RadarTypes.PRI) || types.HasFlag(RDP.RadarTypes.SMR))
+                dto.Syms.Add(TrackPainter.Symbol("Primary", -1, radarTrack.Heading));
+            hasLabel = ssrAny;
+            if (ssrAny) dto.Syms.Add(TrackPainter.Symbol("ModeS", code, radarTrack.Heading));
+        }
+        else if (fdr != null || ssrAny)
+        {
+            hasLabel = true;
+
+            // Wake category for the symbol: withheld when only Mode C is received or
+            // the transponder is off on a primary/SMR return
+            var modeCOnly = types.HasFlag(RDP.RadarTypes.SSR_ModeC) &&
+                            (types & (RDP.RadarTypes.SSR_ModeS | RDP.RadarTypes.ADSB | RDP.RadarTypes.SMR_ADSB)) == 0;
+            var transponderOff = !pilot.TransponderModeC &&
+                                 (types & (RDP.RadarTypes.PRI | RDP.RadarTypes.SMR | RDP.RadarTypes.SMR_ADSB)) != 0;
+            var wake = "";
+            if (fdr != null && !transponderOff)
+            {
+                wake = fdr.AircraftWake ?? "";
+            }
+            else if (!modeCOnly && !transponderOff && !string.IsNullOrEmpty(pilot.AircraftType))
+            {
+                wake = Performance.GetAircraftFromType(pilot.AircraftType)?.WakeCategory ?? "";
+            }
+            else if (!modeCOnly && !transponderOff)
+            {
+                switch (VatSysInternals.EngineTypeName(pilot))
+                {
+                    case "Piston": wake = "L"; break;
+                    case "Jet": wake = "M"; break;
+                }
+            }
+
+            switch (wake)
+            {
+                case "L": dto.Syms.Add(TrackPainter.Symbol("GroundLight", code, aircraftHeading)); break;
+                case "M": dto.Syms.Add(TrackPainter.Symbol("GroundMedium", code, aircraftHeading)); break;
+                case "H": dto.Syms.Add(TrackPainter.Symbol("GroundHeavy", code, aircraftHeading)); break;
+                case "J": dto.Syms.Add(TrackPainter.Symbol("GroundSuper", code, aircraftHeading)); break;
+                default: dto.Syms.Add(TrackPainter.Symbol("Ground", -1, aircraftHeading)); break;
+            }
+        }
+        else
+        {
+            // Primary-only ground return: default symbol, no label
+            hasLabel = false;
+            dto.Syms.Add(TrackPainter.Symbol("Ground", -1, aircraftHeading));
+        }
+
+        if (tl is null) return dto;
+
+        try
+        {
+            if (ReferenceEquals(MMI.SelectedGroundTrack, tl))
+                dto.Syms.Add(TrackPainter.Symbol("Selection", -1, aircraftHeading));
+        }
+        catch { }
+
+        if (hasLabel)
+        {
+            var labelType = "GroundLimited";
+            if (fdr != null && !string.IsNullOrEmpty(icao))
+            {
+                if (radarTrack.OnGround && string.Equals(fdr.DepAirport, icao, StringComparison.OrdinalIgnoreCase))
+                    labelType = "GroundDeparture";
+                else if (radarTrack.OnGround && string.Equals(fdr.DesAirport, icao, StringComparison.OrdinalIgnoreCase))
+                    labelType = "GroundArrival";
+                else
+                    labelType = "GroundAir";
+            }
+
+            try
+            {
+                dto.Label = TrackLabelBuilder.Build(true, tl, fdr, tl.GetQuickTag(), radarTrack, pilot, labelType, colour);
+            }
+            catch { }
+        }
+
+        return dto;
+    }
+
     private volatile List<string> _visibleMapsSnapshot = new();
 
     /// <summary>Returns the currently visible crossing/released map layer keys from vatSys Ground windows.</summary>
     public List<string> GetVisibleCrossingReleasedMaps()
     {
-        // Application.OpenForms and the ASD control state belong to the GUI thread —
-        // queue a snapshot refresh there and serve the latest completed one. The
-        // endpoint is polled continuously, so at most one poll of staleness.
-        try
-        {
-            MMI.InvokeOnGUI(delegate { _visibleMapsSnapshot = ComputeVisibleCrossingReleasedMaps(); });
-        }
-        catch { }
+        // Application.OpenForms and the ASD control state belong to the GUI thread:
+        // compute there and wait briefly, falling back to the last result if the
+        // GUI is busy.
+        GuiThread.Run(() => _visibleMapsSnapshot = ComputeVisibleCrossingReleasedMaps());
         return _visibleMapsSnapshot;
     }
 
@@ -477,28 +451,6 @@ public sealed class GroundDataService
             _profileName = currentName;
         }
     }
-}
-
-public sealed class AircraftDto
-{
-    public string Callsign { get; set; } = "";
-    public double Lat { get; set; }
-    public double Lon { get; set; }
-    public double Hdg { get; set; }
-    public double Gs { get; set; }
-    public int Alt { get; set; } = -1;
-    public bool OnGround { get; set; }
-    public string Category { get; set; } = "unknown";
-    /// <summary>True when an FDR is coupled (ASMGCS or radar coupling).</summary>
-    public bool Coupled { get; set; }
-    /// <summary>RDP.RadarTypes flags: 1=PRI 2=ModeC 4=ModeS 8=ADSB 16=SMR 32=SMR_ADSB.</summary>
-    public int RadarFlags { get; set; }
-    /// <summary>Transponder code for Tracks.xml SpecialCode symbol variants (-1 unknown).</summary>
-    public int Ssr { get; set; } = -1;
-    public string WakeCat { get; set; } = "";
-    public string AircraftType { get; set; } = "";
-    public string Runway { get; set; } = "";
-    public double[][]? History { get; set; }
 }
 
 internal static class Json

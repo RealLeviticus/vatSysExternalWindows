@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using vatsys;
 
 namespace VatSysExternalWindows;
@@ -308,5 +309,36 @@ public static class MapSource
         var lon = c.Longitude;
         if (double.IsNaN(lat) || double.IsNaN(lon) || double.IsInfinity(lat) || double.IsInfinity(lon)) return false;
         return lat != 0 || lon != 0;
+    }
+}
+
+/// <summary>Runs work on the vatSys GUI thread and waits briefly for it, so an
+/// HTTP worker can serve state that belongs to that thread (open forms, the
+/// dynamic maps) as it is now rather than as it was one poll ago.</summary>
+internal static class GuiThread
+{
+    private const int WaitMs = 300;
+
+    /// <summary>Queues <paramref name="work"/> on the GUI thread and waits up to
+    /// 300 ms for it. Returns false if it had not finished (GUI busy, or no main
+    /// window yet); the work may still complete later.</summary>
+    public static bool Run(Action work)
+    {
+        // Deliberately not disposed: the queued delegate may signal after the wait gave up.
+        var done = new ManualResetEventSlim(false);
+        try
+        {
+            MMI.InvokeOnGUI(delegate
+            {
+                try { work(); }
+                catch { }
+                finally { try { done.Set(); } catch { } }
+            });
+            return done.Wait(WaitMs);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

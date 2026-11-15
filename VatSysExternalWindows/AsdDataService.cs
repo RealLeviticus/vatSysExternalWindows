@@ -89,40 +89,40 @@ public sealed class AsdDataService
         return MapSource.GetLayers(DisplayMaps.MapCategories.ASD, mapKeys);
     }
 
-    public int GetVelocityVectors()
+    private volatile DynamicMaps _dynamicMapsSnapshot = new();
+
+    /// <summary>Runtime maps vatSys paints on its windows, in vatSys's paint order.</summary>
+    public sealed class DynamicMaps
     {
-        try { return MMI.VelocityVectors; } catch { return 0; }
+        /// <summary>Painted before the file maps (ASD only): the controlled-sector
+        /// infill, when the user's Dynamic Infill setting is on, then the active
+        /// restricted-area infills.</summary>
+        public List<MapLayer> Below { get; set; } = new();
+        /// <summary>Painted after the file maps (ASD and Ground): active
+        /// restricted-area outlines (Type REST_NTZ_DAIW → PRDArea colour).</summary>
+        public List<MapLayer> Above { get; set; } = new();
     }
 
-    /// <summary>Transition altitude in feet — vatSys Limited labels show levels
-    /// above it as FLnnn and below it as 5-digit feet.</summary>
-    public int GetTransitionAltitude()
+    /// <summary>The dynamic maps as vatSys currently has them. They belong to the
+    /// GUI thread, so they are read there; if the GUI is busy the previous
+    /// snapshot is served.</summary>
+    public DynamicMaps GetDynamicMaps()
     {
-        try { return RDP.TRANSITION_ALTITUDE; } catch { return 10000; }
-    }
-
-    private volatile List<MapLayer> _dynamicMapsSnapshot = new();
-
-    /// <summary>Runtime maps vatSys always paints on the ASD: the controlled-sector
-    /// infill ("Dynamic Infill"), active restricted-area outlines ("Dynamic RMAPS",
-    /// Type REST_NTZ_DAIW → PRDArea colour) and their infills. Built on the GUI
-    /// thread, so snapshot there like the crossing/release maps.</summary>
-    public List<MapLayer> GetDynamicMaps()
-    {
-        try
-        {
-            MMI.InvokeOnGUI(delegate { _dynamicMapsSnapshot = ComputeDynamicMaps(); });
-        }
-        catch { }
+        GuiThread.Run(() => _dynamicMapsSnapshot = ComputeDynamicMaps());
         return _dynamicMapsSnapshot;
     }
 
-    private static List<MapLayer> ComputeDynamicMaps()
+    private static DynamicMaps ComputeDynamicMaps()
     {
-        var result = new List<MapLayer>();
-        try { AddDynamicMap(result, DisplayMaps.DynamicInfill); } catch { }
-        try { AddDynamicMap(result, DisplayMaps.DynamicRestrictedAreaInfills); } catch { }
-        try { AddDynamicMap(result, DisplayMaps.DynamicRestrictedAreas); } catch { }
+        var result = new DynamicMaps();
+        var infillOn = true;
+        try { infillOn = MMI.DynamicInfill; } catch { }
+        if (infillOn)
+        {
+            try { AddDynamicMap(result.Below, DisplayMaps.DynamicInfill); } catch { }
+        }
+        try { AddDynamicMap(result.Below, DisplayMaps.DynamicRestrictedAreaInfills); } catch { }
+        try { AddDynamicMap(result.Above, DisplayMaps.DynamicRestrictedAreas); } catch { }
         return result;
     }
 
@@ -132,10 +132,11 @@ public sealed class AsdDataService
         if (layer is not null) list.Add(layer);
     }
 
-    /// <summary>Returns all radar tracks visible within the given bounds.</summary>
-    public List<AsdAircraftDto> GetAircraft(double centerLat, double centerLon, double rangeNm)
+    /// <summary>Returns the radar tracks within the given bounds, each as vatSys's
+    /// PaintASDTrack / PaintASDLabel would paint it.</summary>
+    public List<TrackDto> GetAircraft(double centerLat, double centerLon, double rangeNm)
     {
-        var result = new List<AsdAircraftDto>();
+        var result = new List<TrackDto>();
 
         IList<RDP.RadarTrack>? tracks = null;
         try { tracks = RDP.RadarTracks; } catch { }
@@ -145,143 +146,12 @@ public sealed class AsdDataService
         var latDelta = rangeNm / 60.0;
         var lonDelta = rangeNm / (60.0 * Math.Max(0.01, Math.Cos(centerLat * Math.PI / 180.0)));
 
-        foreach (var track in tracks)
+        foreach (var radarTrack in tracks)
         {
             try
             {
-                if (track.Cancelled) continue;
-                var coord = track.LatLong;
-                if (coord is null) continue;
-
-                var lat = coord.Latitude;
-                var lon = coord.Longitude;
-                if (double.IsNaN(lat) || double.IsNaN(lon)) continue;
-
-                if (Math.Abs(lat - centerLat) > latDelta || Math.Abs(lon - centerLon) > lonDelta)
-                    continue;
-
-                var callsign = "";
-                var heading = 0.0;
-                var groundSpeed = 0.0;
-                var onGround = false;
-
-                try { onGround = track.OnGround; } catch { }
-                try { heading = track.Heading; } catch { }
-                try { groundSpeed = track.GroundSpeed; } catch { }
-
-                var verticalSpeed = 0.0;
-                try { verticalSpeed = track.VerticalSpeed; } catch { }
-
-                // Symbol selection inputs (PaintASDTrack): radar source flags, coast and
-                // ident state, and squawk for Tracks.xml SpecialCode symbol variants
-                var radarFlags = 0;
-                try { radarFlags = (int)track.RadarTypes; } catch { }
-                var coasting = false;
-                try { coasting = track.Coasting; } catch { }
-                var identing = false;
-                try { identing = track.Identing; } catch { }
-                var ssr = -1;
-                try { ssr = track.ActualAircraft?.TransponderCode ?? -1; } catch { }
-
-                var state = "NonJurisdiction";
-                try
-                {
-                    state = GetTrackState(track);
-                }
-                catch { }
-
-                try
-                {
-                    var fdr = track.CoupledFDR;
-                    if (fdr is not null) callsign = fdr.Callsign ?? "";
-                }
-                catch { }
-
-                if (string.IsNullOrEmpty(callsign))
-                {
-                    try
-                    {
-                        var pilot = track.ActualAircraft;
-                        if (pilot is not null) callsign = pilot.Callsign ?? "";
-                    }
-                    catch { }
-                }
-
-                var coupled = false;
-                var wakeCat = "";
-                var aircraftType = "";
-                var runway = "";
-                var cfl = -1;
-                try
-                {
-                    var fdr = track.CoupledFDR;
-                    if (fdr is not null)
-                    {
-                        coupled = true;
-                        try { wakeCat = fdr.AircraftWake ?? ""; } catch { }
-                        try { aircraftType = fdr.AircraftType ?? ""; } catch { }
-                        // vatSys LABEL_ITEM_RWY: departure runway until ATD is set,
-                        // arrival runway once the aircraft has departed
-                        try
-                        {
-                            runway = fdr.ATD != DateTime.MaxValue
-                                ? fdr.ArrivalRunway?.Name ?? ""
-                                : fdr.DepartureRunway?.Name ?? "";
-                        }
-                        catch { }
-                        try { cfl = fdr.CFLUpper; } catch { }
-                    }
-                }
-                catch { }
-
-                var altitude = -1;
-                try { altitude = track.CorrectedAltitude; } catch { }
-
-                // Position history
-                double[][]? history = null;
-                var maxDots = MMI.HistoryDots;
-                try
-                {
-                    if (maxDots > 0)
-                    {
-                        var posHist = track.PositionHistory?.ToArray();
-                        if (posHist is not null && posHist.Length > 0)
-                        {
-                            var dots = new List<double[]>();
-                            for (int i = posHist.Length - 1; i >= 0 && dots.Count < maxDots; i--)
-                            {
-                                var h = posHist[i];
-                                if (h?.LatLong is null) continue;
-                                dots.Add(new[] { Math.Round(h.LatLong.Latitude, 7), Math.Round(h.LatLong.Longitude, 7) });
-                            }
-                            if (dots.Count > 0) history = dots.ToArray();
-                        }
-                    }
-                }
-                catch { }
-
-                result.Add(new AsdAircraftDto
-                {
-                    Callsign = callsign,
-                    Lat = Math.Round(lat, 7),
-                    Lon = Math.Round(lon, 7),
-                    Hdg = Json.Number(heading, 1),
-                    Gs = Json.Number(groundSpeed, 0),
-                    Alt = altitude,
-                    CFL = cfl,
-                    VSpd = Json.Number(verticalSpeed, 0),
-                    State = state,
-                    OnGround = onGround,
-                    Coupled = coupled,
-                    RadarFlags = radarFlags,
-                    Coasting = coasting,
-                    Ident = identing,
-                    Ssr = ssr,
-                    WakeCat = wakeCat,
-                    AircraftType = aircraftType,
-                    Runway = runway,
-                    History = history,
-                });
+                var dto = BuildAsdTrack(radarTrack, centerLat, centerLon, latDelta, lonDelta);
+                if (dto is not null) result.Add(dto);
             }
             catch { }
         }
@@ -289,19 +159,146 @@ public sealed class AsdDataService
         return result;
     }
 
-    /// <summary>Gets the HMI state for a radar track. vatSys resolves the display Track
-    /// wrapper via MMI.FindTrack (keyed by the radar track or its coupled FDR) and the
-    /// wrapper holds the HMI state in its public State field.</summary>
-    private static string GetTrackState(RDP.RadarTrack radarTrack)
+    /// <summary>Port of ASDControlDX.PaintASDTrack and PaintASDLabel for one radar track.</summary>
+    private static TrackDto? BuildAsdTrack(RDP.RadarTrack radarTrack, double centerLat, double centerLon,
+        double latDelta, double lonDelta)
     {
+        var pilot = radarTrack.ActualAircraft;
+        if (pilot is null) return null;
+
+        var coord = radarTrack.LatLong;
+        if (coord is null) return null;
+        var lat = coord.Latitude;
+        var lon = coord.Longitude;
+        if (double.IsNaN(lat) || double.IsNaN(lon)) return null;
+        if (Math.Abs(lat - centerLat) > latDelta || Math.Abs(lon - centerLon) > lonDelta) return null;
+
+        // vatSys paints display tracks: one in HMI state None, or not visible on the
+        // ASD (SMR-only returns, inhibited or pre-coordination FDRs), is skipped.
+        // A radar track with no display Track is still served, without a label.
+        Track? tl = null;
+        try { tl = MMI.FindTrack(radarTrack); } catch { }
+        if (tl != null && (tl.State == MMI.HMIStates.None || !tl.IsVisibleASD)) return null;
+
+        var colour = TrackPainter.AsdColour(tl, out var isNonJurisdictionBrush);
+        var types = radarTrack.RadarTypes;
+        var code = pilot.TransponderCode;
+        var heading = radarTrack.Heading;
+
+        var dto = new TrackDto
+        {
+            Id = pilot.Callsign ?? "",
+            Lat = Math.Round(lat, 7),
+            Lon = Math.Round(lon, 7),
+            State = (tl?.State ?? MMI.HMIStates.NonJurisdiction).ToString(),
+            Col = TrackLabelBuilder.Rgb(colour),
+            History = TrackPainter.History(radarTrack),
+            HistSsr = code,
+        };
+
+        var velocityVectors = 0;
+        try { velocityVectors = MMI.VelocityVectors; } catch { }
+        if (velocityVectors > 0 && radarTrack.GroundSpeed > 0.0 && !radarTrack.Cancelled && heading != -1.0)
+        {
+            dto.Vv = velocityVectors;
+            dto.Gs = Json.Number(radarTrack.GroundSpeed, 1);
+            dto.Trk = Json.Number(heading, 1);
+        }
+
+        // Symbol: Mode S, else Mode A for Mode C returns, else ADS-B, else primary
+        var symbol = "Primary";
+        if (types.HasFlag(RDP.RadarTypes.SSR_ModeS)) symbol = "ModeS";
+        else if (types.HasFlag(RDP.RadarTypes.SSR_ModeC)) symbol = "ModeA";
+        else if (types.HasFlag(RDP.RadarTypes.ADSB)) symbol = "ADSB";
+
+        var selectable = true;
+        if (radarTrack.Cancelled)
+        {
+            dto.Syms.Add(TrackPainter.Symbol("Cancelled", code, heading));
+            selectable = false;
+        }
+        else if (radarTrack.Coasting)
+        {
+            dto.Syms.Add(TrackPainter.Symbol(symbol == "ADSB" ? "CoastADSB" : "CoastRadar", code, heading));
+        }
+        else if (symbol != "Primary")
+        {
+            // An identing track blinks in the ident colour
+            int[]? identColour = radarTrack.Identing ? TrackLabelBuilder.Rgb(TrackLabelBuilder.Colour(Colours.Identities.IdentFlash)) : null;
+            var main = TrackPainter.Symbol(symbol, code, heading);
+            main.Ident = radarTrack.Identing;
+            main.Col = identColour;
+            dto.Syms.Add(main);
+            if (types.HasFlag(RDP.RadarTypes.PRI))
+            {
+                var primary = TrackPainter.Symbol("Primary", code, heading);
+                primary.Ident = radarTrack.Identing;
+                primary.Col = identColour;
+                dto.Syms.Add(primary);
+            }
+        }
+        else if (types.HasFlag(RDP.RadarTypes.PRI))
+        {
+            dto.Syms.Add(TrackPainter.Symbol("Primary", -1, heading));
+        }
+
+        if (tl is null) return dto;
+
         try
         {
-            var track = MMI.FindTrack(radarTrack);
-            if (track is not null) return track.State.ToString();
+            if (selectable && ReferenceEquals(MMI.SelectedTrack, tl))
+                dto.Syms.Add(TrackPainter.Symbol("Selection", -1, -1));
         }
         catch { }
 
-        return "NonJurisdiction";
+        try { dto.Label = BuildAsdLabel(tl, radarTrack, pilot, colour, isNonJurisdictionBrush); } catch { }
+        return dto;
+    }
+
+    /// <summary>PaintASDLabel: whether the track gets a label, which type, and in
+    /// what colour.</summary>
+    private static LabelDto? BuildAsdLabel(Track tl, RDP.RadarTrack radarTrack, NetworkPilot pilot,
+        System.Drawing.Color trackColour, bool isNonJurisdictionBrush)
+    {
+        var fdr = radarTrack.CoupledFDR;
+        var state = tl.State;
+
+        // No label for cancelled tracks, or for primary-only returns with nothing coupled
+        var types = radarTrack.RadarTypes & ~(RDP.RadarTypes.SMR | RDP.RadarTypes.SMR_ADSB);
+        if (radarTrack.Cancelled) return null;
+        if (types == RDP.RadarTypes.PRI && fdr is null && radarTrack.QuickTag is null) return null;
+
+        // Tracks of interest always get one; other traffic only when airborne, inside
+        // the level filters and not matched by an SSR code filter
+        var show = MMI.QuicklookAll || tl.IQL || state != MMI.HMIStates.NonJurisdiction ||
+                   VatSysInternals.GetAlerts(tl).Count != 0;
+        if (!show)
+        {
+            var altitude = radarTrack.CorrectedAltitude;
+            if (altitude < MMI.UpperLevelFilter && altitude > MMI.LowerLevelFilter && !radarTrack.OnGround)
+            {
+                var filter1 = MMI.SSRCodeFilter1;
+                var filter2 = MMI.SSRCodeFilter2;
+                var code = pilot.TransponderCode;
+                show = !VatSysInternals.SsrFilterMatches(filter1, code) && !VatSysInternals.SsrFilterMatches(filter2, code);
+            }
+        }
+        if (!show) return null;
+
+        string labelType;
+        if (fdr is null) labelType = radarTrack.QuickTag is null ? "Limited" : "Quicktag";
+        else labelType = tl.ManualExtend || (MMI.ExtendedLabels && state > MMI.HMIStates.PostJurisdiction) ? "Extended" : "Normal";
+
+        // Non-jurisdiction labels use their own colour; handover-in and
+        // post-jurisdiction labels blink
+        var blink = state == MMI.HMIStates.HandoverIn || (!tl.IQL && state == MMI.HMIStates.PostJurisdiction);
+        var labelColour = trackColour;
+        if (!blink && !tl.IQL && state == MMI.HMIStates.NonJurisdiction && isNonJurisdictionBrush)
+            labelColour = TrackLabelBuilder.Colour(Colours.Identities.NonJurisdictionLabel);
+
+        var label = TrackLabelBuilder.Build(false, tl, fdr, tl.GetQuickTag(), radarTrack, pilot, labelType, labelColour);
+        if (label != null) label.Blink = blink;
+        return label;
     }
 
     // ---- Position loading ----
@@ -448,30 +445,4 @@ public sealed class AsdDataService
             _profileName = currentName;
         }
     }
-}
-
-public sealed class AsdAircraftDto
-{
-    public string Callsign { get; set; } = "";
-    public double Lat { get; set; }
-    public double Lon { get; set; }
-    public double Hdg { get; set; }
-    public double Gs { get; set; }
-    public int Alt { get; set; } = -1;
-    public int CFL { get; set; } = -1;
-    public double VSpd { get; set; }
-    public string State { get; set; } = "NonJurisdiction";
-    public bool OnGround { get; set; }
-    /// <summary>True when an FDR is coupled to the radar track.</summary>
-    public bool Coupled { get; set; }
-    /// <summary>RDP.RadarTypes flags: 1=PRI 2=ModeC 4=ModeS 8=ADSB 16=SMR 32=SMR_ADSB.</summary>
-    public int RadarFlags { get; set; }
-    public bool Coasting { get; set; }
-    public bool Ident { get; set; }
-    /// <summary>Transponder code for Tracks.xml SpecialCode symbol variants (-1 unknown).</summary>
-    public int Ssr { get; set; } = -1;
-    public string WakeCat { get; set; } = "";
-    public string AircraftType { get; set; } = "";
-    public string Runway { get; set; } = "";
-    public double[][]? History { get; set; }
 }
