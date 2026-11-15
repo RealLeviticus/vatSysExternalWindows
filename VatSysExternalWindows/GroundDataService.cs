@@ -13,13 +13,16 @@ namespace VatSysExternalWindows;
 /// </summary>
 public sealed class GroundDataService
 {
+    // Half-extent (degrees) of the aircraft filter box when the client doesn't
+    // say how far its view reaches.
+    private const double DefaultBoxDegrees = 0.15;
+    private const double MaxRangeNm = 200;
+
     private readonly object _lock = new();
     private string _profileDir = "";
     private string _profileName = "";
     private List<GroundMapData.GroundPosition>? _positions;
-    private readonly Dictionary<string, GroundMapData.AirportMap> _mapCache = new(StringComparer.OrdinalIgnoreCase);
     private GroundMapData.ColourSet? _colours;
-    private List<GroundMapData.GroundMapMeta>? _groundMaps;
     private List<TrackSymbolData.SymbolDef>? _symbols;
 
     // Position history: use vatSys RadarTrack.PositionHistory directly
@@ -28,62 +31,37 @@ public sealed class GroundDataService
     /// <summary>Returns all ASMGCS positions from the profile.</summary>
     public List<GroundMapData.GroundPosition> GetPositions()
     {
-        EnsureProfileDir();
-        _positions ??= GroundMapData.LoadPositions(_profileDir);
-        return _positions;
-    }
-
-    /// <summary>Returns the airport ICAO codes available.</summary>
-    public List<string> GetAirportCodes()
-    {
-        return GetPositions().Select(p => p.Airport).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    /// <summary>Gets the map for an airport, loading and caching on first access.</summary>
-    public GroundMapData.AirportMap? GetMap(string icao)
-    {
-        EnsureProfileDir();
-
         lock (_lock)
         {
-            if (_mapCache.TryGetValue(icao, out var cached))
-                return cached;
-
-            var pos = GetPositions().FirstOrDefault(p =>
-                string.Equals(p.Airport, icao, StringComparison.OrdinalIgnoreCase));
-
-            if (pos is null) return null;
-
-            var map = GroundMapData.LoadAirportMap(_profileDir, pos);
-            if (map is not null)
-                _mapCache[icao] = map;
-
-            return map;
+            EnsureProfileDir();
+            return _positions ??= GroundMapData.LoadPositions(_profileDir);
         }
     }
 
     /// <summary>Returns the ground colour scheme.</summary>
     public GroundMapData.ColourSet GetColours()
     {
-        EnsureProfileDir();
-        _colours ??= GroundMapData.LoadColours(_profileDir);
-        return _colours;
+        lock (_lock)
+        {
+            EnsureProfileDir();
+            return _colours ??= GroundMapData.LoadColours(_profileDir);
+        }
     }
 
-    /// <summary>Returns metadata for ALL Ground-category maps across the profile (for dropdown).</summary>
-    public List<GroundMapData.GroundMapMeta> GetGroundMaps()
+    /// <summary>Returns metadata for ALL Ground-category maps vatSys loaded (for the Maps menu).</summary>
+    public List<MapMeta> GetGroundMaps()
     {
-        EnsureProfileDir();
-        _groundMaps ??= GroundMapData.ScanAllGroundMaps(_profileDir);
-        return _groundMaps;
+        return MapSource.ListMaps(DisplayMaps.MapCategories.Ground);
     }
 
     /// <summary>Returns the profile's Tracks.xml symbol definitions (with DefaultTracks.xml backfill).</summary>
     public List<TrackSymbolData.SymbolDef> GetTrackSymbols()
     {
-        EnsureProfileDir();
-        _symbols ??= TrackSymbolData.Load(_profileDir);
-        return _symbols;
+        lock (_lock)
+        {
+            EnsureProfileDir();
+            return _symbols ??= TrackSymbolData.Load(_profileDir);
+        }
     }
 
     /// <summary>Current ASD label font size in pixels (MMI.ASDMainFont honours the user's setting).</summary>
@@ -98,19 +76,31 @@ public sealed class GroundDataService
         try { return MMI.ASDMapFont.Size; } catch { return 16; }
     }
 
-    /// <summary>Loads geometry for specific map layers identified by "Folder/Name" keys.</summary>
-    public List<GroundMapData.MapLayer> GetMapLayers(List<string> mapKeys)
+    /// <summary>Geometry for specific Ground map layers identified by "Folder/Name" keys.</summary>
+    public List<MapLayer> GetMapLayers(List<string> mapKeys)
     {
-        EnsureProfileDir();
-        return GroundMapData.LoadSpecificLayers(_profileDir, mapKeys);
+        return MapSource.GetLayers(DisplayMaps.MapCategories.Ground, mapKeys);
     }
 
-    /// <summary>Returns aircraft near the given airport.</summary>
-    public List<AircraftDto> GetAircraft(string icao)
+    /// <summary>Returns aircraft around the given airport. vatSys paints every track
+    /// inside the Ground window, so the client passes how far its view reaches
+    /// (<paramref name="rangeNm"/> from the position centre); without it a small
+    /// default box around the airport is used.</summary>
+    public List<AircraftDto> GetAircraft(string icao, double? rangeNm = null)
     {
         var result = new List<AircraftDto>();
-        var map = GetMap(icao);
-        if (map is null) return result;
+        var pos = GetPositions().FirstOrDefault(p =>
+            string.Equals(p.Airport, icao, StringComparison.OrdinalIgnoreCase));
+        if (pos is null) return result;
+
+        var latDelta = DefaultBoxDegrees;
+        var lonDelta = DefaultBoxDegrees;
+        if (rangeNm is double range && range > 0 && !double.IsNaN(range))
+        {
+            range = Math.Min(range, MaxRangeNm);
+            latDelta = range / 60.0;
+            lonDelta = range / (60.0 * Math.Max(0.01, Math.Cos(pos.CenterLat * Math.PI / 180.0)));
+        }
 
         IList<RDP.RadarTrack>? tracks = null;
         try { tracks = RDP.RadarTracks; } catch { }
@@ -131,8 +121,9 @@ public sealed class GroundDataService
 
                 var lat = coord.Latitude;
                 var lon = coord.Longitude;
+                if (double.IsNaN(lat) || double.IsNaN(lon)) continue;
 
-                if (Math.Abs(lat - map.CenterLat) > 0.15 || Math.Abs(lon - map.CenterLon) > 0.15)
+                if (Math.Abs(lat - pos.CenterLat) > latDelta || Math.Abs(lon - pos.CenterLon) > lonDelta)
                     continue;
 
                 var onGround = false;
@@ -255,8 +246,8 @@ public sealed class GroundDataService
                     Callsign = callsign,
                     Lat = Math.Round(lat, 7),
                     Lon = Math.Round(lon, 7),
-                    Hdg = Math.Round(heading, 1),
-                    Gs = Math.Round(groundSpeed, 0),
+                    Hdg = Json.Number(heading, 1),
+                    Gs = Json.Number(groundSpeed, 0),
                     Alt = altitude,
                     OnGround = onGround,
                     Category = category,
@@ -479,9 +470,7 @@ public sealed class GroundDataService
 
             // First resolution or profile changed — clear caches and re-resolve
             _positions = null;
-            _mapCache.Clear();
             _colours = null;
-            _groundMaps = null;
             _symbols = null;
 
             _profileDir = ProfileLocator.Resolve();
@@ -510,4 +499,14 @@ public sealed class AircraftDto
     public string AircraftType { get; set; } = "";
     public string Runway { get; set; } = "";
     public double[][]? History { get; set; }
+}
+
+internal static class Json
+{
+    /// <summary>Rounds a value for the JSON payload. NaN and infinities would
+    /// serialise as invalid JSON and lose the whole response, so they become 0.</summary>
+    public static double Number(double value, int digits)
+    {
+        return double.IsNaN(value) || double.IsInfinity(value) ? 0 : Math.Round(value, digits);
+    }
 }

@@ -29,10 +29,11 @@ body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bot
 .dd-item.disabled{color:rgb(96,0,0);cursor:default;}
 .dd-item.disabled:hover{background:transparent;}
 .dd-item .chk{width:22px;text-align:center;flex-shrink:0;font-size:14px;}
-.dd-sep{height:1px;background:rgb(120,128,128);margin:1px 2px;}
 .dd-back{font-weight:bold;border-bottom:1px solid rgb(120,128,128);}
-.dd-group>.dd-item::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;display:inline-block;}
-canvas{flex:1;display:block;touch-action:none;}
+.dd-group::after{content:'\25B6';margin-left:auto;padding-left:14px;font-size:9px;display:inline-block;}
+/* min-height:0 lets the canvas shrink with the window (a flex item's
+   default minimum is its own bitmap size) */
+canvas{flex:1;min-height:0;display:block;touch-action:none;}
 </style>
 </head>
 <body>
@@ -91,10 +92,10 @@ let dynamicLayers=[];
 let symTable={};
 function symKey(t,c){return t+'|'+c;}
 function buildSymTable(defs){
-  symTable={};
   for(let d of defs) symTable[symKey(d.Type,d.SpecialCode)]=d;
 }
-// Fallback: Australia profile defaults, used until /api/symbols loads
+// Fallback: Australia profile defaults, used until /api/symbols loads and for
+// any symbol type the server doesn't return
 buildSymTable([
  {Type:'Primary',SpecialCode:-1,StrokeWidth:2,Rotate:false,Shapes:[{Kind:'path',Figures:[
    {Start:[-6,0],Filled:false,Closed:false,Segs:[{T:'l',P:[6,0]}]},
@@ -181,6 +182,7 @@ function latLonToCanvas(lat,lon){
   let scale=W/nmRange;
   return[W/2+panX+xNm*scale,H/2+panY-yNm*scale];
 }
+function viewRotationRad(){return 0;}
 
 /* ============================================================
    Colours
@@ -371,30 +373,132 @@ function drawMapLayer(layer){
     }
     ctx.lineWidth=1;
 
-    // Map labels — map's own colour, ASDMapFont
-    ctx.fillStyle=col;
-    ctx.font='bold '+mapFontSize+""px 'Terminus','Consolas',monospace"";
-    ctx.textAlign='center';ctx.textBaseline='middle';
-    for(let lb of layer.Labels){let p=latLonToCanvas(lb.Lat,lb.Lon);ctx.fillText(lb.Text,p[0],p[1]);}
+    drawRunways(layer,col);
+    drawMapSymbols(layer,col);
+    drawMapLabels(layer,col);
+}
 
-    // Map symbols (navaid dots, etc.)
-    if(layer.Symbols&&layer.Symbols.length>0){
-      ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=1;
-      for(let sym of layer.Symbols){
-        let sp=latLonToCanvas(sym.Lat,sym.Lon);
-        let st=(sym.SymbolType||'').toLowerCase();
-        if(st==='solidsquare'){
-          ctx.fillRect(sp[0]-2,sp[1]-2,4,4);
-        }else if(st==='hollowsquare'){
-          ctx.strokeRect(sp[0]-2,sp[1]-2,4,4);
-        }else if(st==='hollowtriangle'){
-          ctx.beginPath();ctx.moveTo(sp[0],sp[1]-3);ctx.lineTo(sp[0]+3,sp[1]+2);ctx.lineTo(sp[0]-3,sp[1]+2);ctx.closePath();ctx.stroke();
-        }else{
-          // DotFillCircle or default - filled circle
-          ctx.beginPath();ctx.arc(sp[0],sp[1],2,0,Math.PI*2);ctx.fill();
-        }
+/* ============================================================
+   Map runways, symbols and labels — ports of vatSys
+   ASDControlDX.PaintMap (drawn in that order, after the lines)
+   ============================================================ */
+// Runway: 2.5px line between the thresholds, 1px extended centrelines
+// with 12px tick marks across them.
+function drawRunways(layer,col){
+  if(!layer.Runways||layer.Runways.length===0) return;
+  ctx.strokeStyle=col;ctx.setLineDash([]);ctx.lineCap='butt';
+  let rot=viewRotationRad();
+  for(let rw of layer.Runways){
+    let a=latLonToCanvas(rw.P1[0],rw.P1[1]),b=latLonToCanvas(rw.P2[0],rw.P2[1]);
+    ctx.lineWidth=2.5;
+    ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+    ctx.lineWidth=1;
+    for(let cl of (rw.Centrelines||[])){
+      let f=latLonToCanvas(cl.From[0],cl.From[1]),t=latLonToCanvas(cl.To[0],cl.To[1]);
+      let ang=cl.Track*Math.PI/180+rot,dx=6*Math.cos(ang),dy=6*Math.sin(ang);
+      ctx.beginPath();ctx.moveTo(f[0],f[1]);ctx.lineTo(t[0],t[1]);
+      for(let tk of (cl.Ticks||[])){
+        let q=latLonToCanvas(tk[0],tk[1]);
+        ctx.moveTo(q[0]+dx,q[1]+dy);ctx.lineTo(q[0]-dx,q[1]-dy);
       }
+      ctx.stroke();
     }
+  }
+}
+
+// Map symbols: the 14 vatSys Map.Symbol.Types, same geometry as the
+// 16x16 bitmaps vatSys builds in CreateSymbolOpacityBitmaps.
+const SYM_TRIANGLE=[[0,-4],[4,3],[-4,3]];
+const SYM_STAR=[[0,8],[2,2],[8,0],[2,-2],[0,-8],[-2,-2],[-8,0],[-2,2]];
+const SYM_MALTESE=[[-3,7],[3,7],[1,1],[7,3],[7,-3],[1,-1],[3,-7],[-3,-7],[-1,-1],[-7,-3],[-7,3],[-1,1]];
+const SYM_HEXAGON=[[3,-5],[-3,-5],[-6,0],[-3,5],[3,5],[6,0]];
+function symPoly(pts){
+  ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);
+  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+  ctx.closePath();
+}
+function symCircle(r){ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);}
+function drawMapSymbols(layer,col){
+  if(!layer.Symbols||layer.Symbols.length===0) return;
+  ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=1;ctx.setLineDash([]);
+  for(let sym of layer.Symbols){
+    let p=latLonToCanvas(sym.Lat,sym.Lon);
+    if(p[0]<0||p[1]<0||p[0]>W||p[1]>H) continue;
+    ctx.save();ctx.translate(p[0],p[1]);
+    switch(sym.SymbolType){
+      case'SolidTriangle':symPoly(SYM_TRIANGLE);ctx.fill();ctx.stroke();break;
+      case'HollowTriangle':symPoly(SYM_TRIANGLE);ctx.stroke();break;
+      case'SolidTriangleWithBorder':symPoly(SYM_TRIANGLE);ctx.fill();ctx.strokeRect(-4,-4,8,7);break;
+      case'HollowTriangleWithBorder':symPoly(SYM_TRIANGLE);ctx.stroke();ctx.strokeRect(-4,-4,8,7);break;
+      case'HollowSquare':ctx.strokeRect(-3,-3,6,6);break;
+      case'SolidStar':symPoly(SYM_STAR);ctx.fill();ctx.stroke();break;
+      case'HollowStar':symPoly(SYM_STAR);ctx.stroke();break;
+      case'MalteseCross':symPoly(SYM_MALTESE);ctx.fill();break;
+      case'Circle':symCircle(6);ctx.stroke();break;
+      case'DashedCircle':ctx.setLineDash([8,8]);symCircle(6);ctx.stroke();ctx.setLineDash([]);break;
+      case'DotFillCircle':
+        symCircle(2);ctx.stroke();
+        ctx.lineWidth=0.5;ctx.setLineDash([1,1]);
+        for(let r=3;r<=7;r++){symCircle(r);ctx.stroke();}
+        ctx.setLineDash([]);ctx.lineWidth=1;
+        break;
+      case'Reticle':
+        ctx.beginPath();
+        ctx.moveTo(0,5);ctx.lineTo(0,8);ctx.moveTo(5,0);ctx.lineTo(8,0);
+        ctx.moveTo(0,-5);ctx.lineTo(0,-8);ctx.moveTo(-5,0);ctx.lineTo(-8,0);
+        ctx.stroke();
+        symCircle(6);ctx.stroke();
+        break;
+      case'Hexagon':symPoly(SYM_HEXAGON);ctx.stroke();break;
+      default:ctx.fillRect(-4,-4,8,8); // SolidSquare, the vatSys default
+    }
+    ctx.restore();
+  }
+}
+
+// Map labels: ASDMapFont in the map's own colour. With a leader the text is
+// anchored at the end of a short line in the LabelOrientation direction;
+// Alignment/VerticalAlignment then position the text box on that anchor.
+// A label that would overlap one already drawn for the same map is skipped.
+const LABEL_OFFSET={N:[0,-14],NE:[10,-10],E:[14,0],SE:[10,10],S:[0,14],SW:[-10,10],W:[-19,0],NW:[-15,-15]};
+function drawMapLabels(layer,col){
+  if(!layer.Labels||layer.Labels.length===0) return;
+  ctx.font='bold '+mapFontSize+""px 'Terminus','Consolas',monospace"";
+  ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillStyle=col;ctx.strokeStyle=col;ctx.lineWidth=1;ctx.setLineDash([]);
+  let cw=ctx.measureText('0').width,fh=mapFontSize;
+  let placed=[];
+  for(let lb of layer.Labels){
+    let p=latLonToCanvas(lb.Lat,lb.Lon);
+    if(p[0]<0||p[1]<0||p[0]>W||p[1]>H) continue;
+    let text=lb.Text||'';
+    let tw=cw*text.length;
+    let ax=lb.Align==='Center'?tw/2:(lb.Align==='Right'?tw:0);
+    let ay=lb.VAlign==='Top'?0:(lb.VAlign==='Middle'?fh/2:fh);
+    let leader=lb.Leader!==false;
+    let anchor=p;
+    if(leader){let o=LABEL_OFFSET[lb.Dir]||LABEL_OFFSET.NE;anchor=[p[0]+o[0],p[1]+o[1]];}
+    let x=anchor[0]-ax,y=anchor[1]-ay;
+    let clash=false;
+    for(let r of placed){
+      if(x<r[0]+r[2]&&x+tw>r[0]&&y<r[1]+fh&&y+fh>r[1]){clash=true;break;}
+    }
+    if(clash) continue;
+    placed.push([x,y,tw]);
+    if(leader){ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(anchor[0],anchor[1]);ctx.stroke();}
+    ctx.fillText(text,x,y);
+    // Border flags: 1=Left 2=Right 4=Top 8=Bottom
+    let b=lb.Border||0;
+    if(b){
+      let bx=x-1,by=y+1,bw=tw+1;
+      ctx.beginPath();
+      if(b&1){ctx.moveTo(bx,by);ctx.lineTo(bx,by+fh);}
+      if(b&2){ctx.moveTo(bx+bw,by);ctx.lineTo(bx+bw,by+fh);}
+      if(b&4){ctx.moveTo(bx,by);ctx.lineTo(bx+bw,by);}
+      if(b&8){ctx.moveTo(bx,by+fh);ctx.lineTo(bx+bw,by+fh);}
+      ctx.stroke();
+    }
+  }
 }
 
 /* ============================================================
@@ -415,6 +519,7 @@ function getLabelLen(cs){return labelState[cs]?labelState[cs].len:LABEL_LEN_DEFA
 
 function getLabelOrientation(tx,ty,mx,my){
   let dy=my-ty,dx=mx-tx;
+  if(dx===0&&dy===0) return[LABEL_DIR_DEFAULT,LABEL_LEN_DEFAULT]; // pointer exactly on the track
   let angle=Math.atan(dy/Math.abs(dx))*180/Math.PI;
   if(dx<0) angle=360-angle+180;
   if(angle>360) angle-=360;
@@ -849,10 +954,9 @@ function toggleMapLayer(key,meta,chkEl){
 }
 
 function loadLayerGeometry(key){
-  return fetch('/api/asd/maplayers?maps='+encodeURIComponent(key))
-    .then(r=>r.json())
+  return api('/api/asd/maplayers?maps='+encodeURIComponent(key))
     .then(layers=>{
-      if(layers&&layers.length>0){
+      if(Array.isArray(layers)&&layers.length>0){
         let lk=layerKey(layers[0].Folder,layers[0].Name);
         if(layerState[lk]) layerState[lk].layer=layers[0];
       }
@@ -861,10 +965,9 @@ function loadLayerGeometry(key){
 
 function loadMultipleLayers(keys){
   if(keys.length===0) return Promise.resolve();
-  return fetch('/api/asd/maplayers?maps='+encodeURIComponent(keys.join(',')))
-    .then(r=>r.json())
+  return api('/api/asd/maplayers?maps='+encodeURIComponent(keys.join(',')))
     .then(layers=>{
-      if(!layers) return;
+      if(!Array.isArray(layers)) return;
       for(let layer of layers){
         let key=layerKey(layer.Folder,layer.Name);
         if(layerState[key]) layerState[key].layer=layer;
@@ -875,7 +978,9 @@ function loadMultipleLayers(keys){
 /* ============================================================
    Position selection
    ============================================================ */
+let selectSeq=0;
 function selectPosition(pos){
+  let seq=++selectSeq; // a slow layer load must not act for a superseded selection
   selectedPos=pos;
   if(acTimer){clearInterval(acTimer);acTimer=null;}
   aircraft=[];
@@ -910,6 +1015,7 @@ function selectPosition(pos){
 
   if(checkedKeys.length>0){
     loadMultipleLayers(checkedKeys).then(()=>{
+      if(seq!==selectSeq) return;
       scheduleRender();
       startAircraftPolling();
     });
@@ -922,15 +1028,22 @@ function selectPosition(pos){
 /* ============================================================
    API
    ============================================================ */
-function api(path){return fetch(path).then(r=>r.json());}
+// Rejects on HTTP errors so an error body is never mistaken for data
+function api(path){
+  return fetch(path).then(r=>{
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  });
+}
 
 function loadPositions(){
   api('/api/asd/positions').then(data=>{
-    positions=data||[];
+    positions=Array.isArray(data)?data:[];
     buildPositionMenu();
   }).catch(()=>{});
 }
 
+let mapListRetries=0;
 function loadAsdMaps(){
   api('/api/asd/maps').then(data=>{
     allAsdMaps=data.Maps||[];
@@ -944,6 +1057,9 @@ function loadAsdMaps(){
       if(!layerState[key]) layerState[key]={visible:false,layer:null};
     }
     buildMapsMenu();
+    scheduleRender();
+    // The map list is empty until vatSys has finished loading the profile's maps
+    if(allAsdMaps.length===0&&mapListRetries++<20) setTimeout(loadAsdMaps,3000);
   }).catch(()=>{});
 }
 
@@ -961,7 +1077,7 @@ function loadSymbols(){
 // periodically.
 function loadDynamicMaps(){
   api('/api/asd/dynamicmaps').then(data=>{
-    dynamicLayers=data||[];
+    dynamicLayers=Array.isArray(data)?data:[];
     scheduleRender();
   }).catch(()=>{});
 }
@@ -986,7 +1102,7 @@ function startAircraftPolling(){
     let vLon=centerLon-(panX/scale)*nmToDegLon(centerLat);
     let rng=Math.ceil(nmRange*0.5*Math.max(1,H/W)*1.3)+5;
     api('/api/asd/aircraft?lat='+vLat.toFixed(5)+'&lon='+vLon.toFixed(5)+'&range='+rng).then(data=>{
-      aircraft=data||[];updateFlashTimer();scheduleRender();
+      aircraft=Array.isArray(data)?data:[];updateFlashTimer();scheduleRender();
     }).catch(()=>{});
   }
   poll();

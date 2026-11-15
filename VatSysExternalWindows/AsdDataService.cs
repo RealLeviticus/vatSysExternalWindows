@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using vatsys;
 
@@ -15,15 +14,11 @@ namespace VatSysExternalWindows;
 /// </summary>
 public sealed class AsdDataService
 {
-    // vatSys DisplayMaps.LoadMaps airway-route detection regex ("FIX.AIRWAY.FIX")
-    private static readonly Regex RouteRegex = new(@"^\w+(\s\w+)?[.]\w+[.]\w+(\s\w+)?$", RegexOptions.Compiled);
-
     private readonly object _lock = new();
     private string _profileDir = "";
     private string _profileName = "";
     private List<AsdPosition>? _positions;
     private AsdColourSet? _colours;
-    private List<AsdMapMeta>? _asdMaps;
 
     public sealed class AsdPosition
     {
@@ -64,40 +59,34 @@ public sealed class AsdDataService
         public Dictionary<string, int[]> CustomColours { get; set; } = new();
     }
 
-    public sealed class AsdMapMeta
-    {
-        public string Folder { get; set; } = "";
-        public string Name { get; set; } = "";
-        public string Type { get; set; } = "";
-        public double CenterLat { get; set; }
-        public double CenterLon { get; set; }
-    }
-
     public List<AsdPosition> GetPositions()
     {
-        EnsureProfileDir();
-        _positions ??= LoadAsdPositions(_profileDir);
-        return _positions;
+        lock (_lock)
+        {
+            EnsureProfileDir();
+            return _positions ??= LoadAsdPositions(_profileDir);
+        }
     }
 
     public AsdColourSet GetColours()
     {
-        EnsureProfileDir();
-        _colours ??= LoadAsdColours(_profileDir);
-        return _colours;
+        lock (_lock)
+        {
+            EnsureProfileDir();
+            return _colours ??= LoadAsdColours(_profileDir);
+        }
     }
 
-    public List<AsdMapMeta> GetAsdMaps()
+    /// <summary>Metadata for all ASD-category maps vatSys loaded (for the Maps menu).</summary>
+    public List<MapMeta> GetAsdMaps()
     {
-        EnsureProfileDir();
-        _asdMaps ??= ScanAllAsdMaps(_profileDir);
-        return _asdMaps;
+        return MapSource.ListMaps(DisplayMaps.MapCategories.ASD);
     }
 
-    public List<GroundMapData.MapLayer> GetMapLayers(List<string> mapKeys)
+    /// <summary>Geometry for specific ASD map layers identified by "Folder/Name" keys.</summary>
+    public List<MapLayer> GetMapLayers(List<string> mapKeys)
     {
-        EnsureProfileDir();
-        return LoadAsdLayers(_profileDir, mapKeys);
+        return MapSource.GetLayers(DisplayMaps.MapCategories.ASD, mapKeys);
     }
 
     public int GetVelocityVectors()
@@ -112,13 +101,13 @@ public sealed class AsdDataService
         try { return RDP.TRANSITION_ALTITUDE; } catch { return 10000; }
     }
 
-    private volatile List<GroundMapData.MapLayer> _dynamicMapsSnapshot = new();
+    private volatile List<MapLayer> _dynamicMapsSnapshot = new();
 
     /// <summary>Runtime maps vatSys always paints on the ASD: the controlled-sector
     /// infill ("Dynamic Infill"), active restricted-area outlines ("Dynamic RMAPS",
     /// Type REST_NTZ_DAIW → PRDArea colour) and their infills. Built on the GUI
     /// thread, so snapshot there like the crossing/release maps.</summary>
-    public List<GroundMapData.MapLayer> GetDynamicMaps()
+    public List<MapLayer> GetDynamicMaps()
     {
         try
         {
@@ -128,57 +117,19 @@ public sealed class AsdDataService
         return _dynamicMapsSnapshot;
     }
 
-    private static List<GroundMapData.MapLayer> ComputeDynamicMaps()
+    private static List<MapLayer> ComputeDynamicMaps()
     {
-        var result = new List<GroundMapData.MapLayer>();
+        var result = new List<MapLayer>();
         try { AddDynamicMap(result, DisplayMaps.DynamicInfill); } catch { }
         try { AddDynamicMap(result, DisplayMaps.DynamicRestrictedAreaInfills); } catch { }
         try { AddDynamicMap(result, DisplayMaps.DynamicRestrictedAreas); } catch { }
         return result;
     }
 
-    private static void AddDynamicMap(List<GroundMapData.MapLayer> list, DisplayMaps.Map? map)
+    private static void AddDynamicMap(List<MapLayer> list, DisplayMaps.Map? map)
     {
-        if (map is null) return;
-
-        var layer = new GroundMapData.MapLayer
-        {
-            Type = map.Type.ToString(),
-            Name = map.Name ?? "",
-            Folder = "",
-            CustomColour = map.CustomColourName ?? "",
-        };
-
-        foreach (var inf in map.Infills)
-        {
-            if (inf?.Points is null || inf.Points.Count < 3) continue;
-            var poly = new GroundMapData.InfillPolygon
-            {
-                Name = inf.Name ?? "",
-                InfillType = inf.Type.ToString(),
-                Pattern = inf.Pattern.ToString(),
-            };
-            foreach (var c in inf.Points)
-                poly.Points.Add(new[] { Math.Round(c.Latitude, 7), Math.Round(c.Longitude, 7) });
-            layer.Infills.Add(poly);
-        }
-
-        foreach (var ln in map.Lines)
-        {
-            if (ln?.Points is null || ln.Points.Count < 2) continue;
-            var line = new GroundMapData.MapLine
-            {
-                Name = ln.Name ?? "",
-                Pattern = ln.Pattern.ToString(),
-                Width = ln.Width,
-            };
-            foreach (var c in ln.Points)
-                line.Points.Add(new[] { Math.Round(c.Latitude, 7), Math.Round(c.Longitude, 7) });
-            layer.Lines.Add(line);
-        }
-
-        if (layer.Infills.Count > 0 || layer.Lines.Count > 0)
-            list.Add(layer);
+        var layer = MapSource.ToLayer(map);
+        if (layer is not null) list.Add(layer);
     }
 
     /// <summary>Returns all radar tracks visible within the given bounds.</summary>
@@ -192,7 +143,7 @@ public sealed class AsdDataService
 
         // Convert range to approximate lat/lon delta for filtering
         var latDelta = rangeNm / 60.0;
-        var lonDelta = rangeNm / (60.0 * Math.Cos(centerLat * Math.PI / 180.0));
+        var lonDelta = rangeNm / (60.0 * Math.Max(0.01, Math.Cos(centerLat * Math.PI / 180.0)));
 
         foreach (var track in tracks)
         {
@@ -204,6 +155,7 @@ public sealed class AsdDataService
 
                 var lat = coord.Latitude;
                 var lon = coord.Longitude;
+                if (double.IsNaN(lat) || double.IsNaN(lon)) continue;
 
                 if (Math.Abs(lat - centerLat) > latDelta || Math.Abs(lon - centerLon) > lonDelta)
                     continue;
@@ -259,7 +211,6 @@ public sealed class AsdDataService
                 var wakeCat = "";
                 var aircraftType = "";
                 var runway = "";
-                var destination = "";
                 var cfl = -1;
                 try
                 {
@@ -278,7 +229,6 @@ public sealed class AsdDataService
                                 : fdr.DepartureRunway?.Name ?? "";
                         }
                         catch { }
-                        try { destination = fdr.DesAirport ?? ""; } catch { }
                         try { cfl = fdr.CFLUpper; } catch { }
                     }
                 }
@@ -315,11 +265,11 @@ public sealed class AsdDataService
                     Callsign = callsign,
                     Lat = Math.Round(lat, 7),
                     Lon = Math.Round(lon, 7),
-                    Hdg = Math.Round(heading, 1),
-                    Gs = Math.Round(groundSpeed, 0),
+                    Hdg = Json.Number(heading, 1),
+                    Gs = Json.Number(groundSpeed, 0),
                     Alt = altitude,
                     CFL = cfl,
-                    VSpd = Math.Round(verticalSpeed, 0),
+                    VSpd = Json.Number(verticalSpeed, 0),
                     State = state,
                     OnGround = onGround,
                     Coupled = coupled,
@@ -330,7 +280,6 @@ public sealed class AsdDataService
                     WakeCat = wakeCat,
                     AircraftType = aircraftType,
                     Runway = runway,
-                    Destination = destination,
                     History = history,
                 });
             }
@@ -439,7 +388,7 @@ public sealed class AsdDataService
             foreach (var elem in root.Elements("Colour"))
             {
                 var id = elem.Attribute("id")?.Value ?? "";
-                var rgb = ReadRgb(elem);
+                var rgb = GroundMapData.ReadRgb(elem);
                 if (rgb is null) continue;
 
                 switch (id)
@@ -479,340 +428,6 @@ public sealed class AsdDataService
         return colours;
     }
 
-    private static int[]? ReadRgb(XElement elem)
-    {
-        if (!int.TryParse(elem.Element("R")?.Value, out var r)) return null;
-        if (!int.TryParse(elem.Element("G")?.Value, out var g)) return null;
-        if (!int.TryParse(elem.Element("B")?.Value, out var b)) return null;
-        return new[] { r, g, b };
-    }
-
-    // ---- ASD Map scanning ----
-
-    private static List<AsdMapMeta> ScanAllAsdMaps(string profileDir)
-    {
-        var result = new List<AsdMapMeta>();
-        var mapsDir = Path.Combine(profileDir, "Maps");
-        if (!Directory.Exists(mapsDir)) return result;
-
-        try
-        {
-            var files = Directory.GetFiles(mapsDir, "*.xml", SearchOption.AllDirectories);
-            foreach (var file in files)
-            {
-                try
-                {
-                    var dirName = Path.GetFileName(Path.GetDirectoryName(file)) ?? "";
-                    var folder = string.Equals(dirName, "Maps", StringComparison.OrdinalIgnoreCase) ? "" : dirName;
-
-                    var doc = XDocument.Load(file);
-                    var root = doc.Root;
-                    if (root is null) continue;
-
-                    foreach (var mapElem in root.Elements("Map"))
-                    {
-                        var type = mapElem.Attribute("Type")?.Value ?? "";
-                        // ASD-category: Type does NOT start with "Ground_"
-                        if (type.StartsWith("Ground_", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (string.IsNullOrWhiteSpace(type)) continue;
-
-                        var name = mapElem.Attribute("Name")?.Value ?? "";
-                        if (string.IsNullOrWhiteSpace(name)) continue;
-
-                        var centerStr = mapElem.Attribute("Center")?.Value ?? "";
-                        var (clat, clon) = string.IsNullOrWhiteSpace(centerStr)
-                            ? (0.0, 0.0)
-                            : GroundMapData.ParseCoordinate(centerStr);
-
-                        result.Add(new AsdMapMeta { Folder = folder, Name = name, Type = type, CenterLat = clat, CenterLon = clon });
-                    }
-                }
-                catch { }
-            }
-        }
-        catch { }
-
-        result.Sort((a, b) =>
-        {
-            var fc = string.Compare(a.Folder, b.Folder, StringComparison.OrdinalIgnoreCase);
-            return fc != 0 ? fc : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
-        });
-        return result;
-    }
-
-    /// <summary>Loads geometry for specific ASD map layers.</summary>
-    private static List<GroundMapData.MapLayer> LoadAsdLayers(string profileDir, List<string> mapKeys)
-    {
-        var result = new List<GroundMapData.MapLayer>();
-        if (mapKeys.Count == 0) return result;
-
-        var mapsDir = Path.Combine(profileDir, "Maps");
-        if (!Directory.Exists(mapsDir)) return result;
-
-        var needed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var key in mapKeys) needed.Add(key);
-
-        try
-        {
-            var files = Directory.GetFiles(mapsDir, "*.xml", SearchOption.AllDirectories);
-            foreach (var file in files)
-            {
-                if (needed.Count == 0) break;
-                try
-                {
-                    var dirName = Path.GetFileName(Path.GetDirectoryName(file)) ?? "";
-                    var folder = string.Equals(dirName, "Maps", StringComparison.OrdinalIgnoreCase) ? "" : dirName;
-
-                    var doc = XDocument.Load(file);
-                    var root = doc.Root;
-                    if (root is null) continue;
-
-                    foreach (var mapElem in root.Elements("Map"))
-                    {
-                        var type = mapElem.Attribute("Type")?.Value ?? "";
-                        if (type.StartsWith("Ground_", StringComparison.OrdinalIgnoreCase)) continue;
-
-                        var name = mapElem.Attribute("Name")?.Value ?? "";
-                        var key = string.IsNullOrEmpty(folder) ? name : folder + "/" + name;
-                        if (!needed.Contains(key)) continue;
-
-                        needed.Remove(key);
-                        var priority = int.TryParse(mapElem.Attribute("Priority")?.Value, out var p) ? p : 99;
-                        var customColour = mapElem.Attribute("CustomColourName")?.Value ?? "";
-                        var layer = new GroundMapData.MapLayer { Type = type, Name = name, Folder = folder, Priority = priority, CustomColour = customColour };
-
-                        // Reuse the shared map geometry parser via reflection or parse inline
-                        ParseAsdMapGeometry(mapElem, layer);
-
-                        if (layer.Infills.Count > 0 || layer.Lines.Count > 0 || layer.Labels.Count > 0 || layer.Symbols.Count > 0)
-                            result.Add(layer);
-                    }
-                }
-                catch { }
-            }
-        }
-        catch { }
-
-        result.Sort((a, b) => b.Priority.CompareTo(a.Priority));
-        return result;
-    }
-
-    private static void ParseAsdMapGeometry(XElement mapElem, GroundMapData.MapLayer layer)
-    {
-        // vatSys: lines and infills without their own Pattern inherit the Map's Pattern
-        var mapPattern = mapElem.Attribute("Pattern")?.Value ?? "";
-
-        // vatSys LoadMaps uses GetElementsByTagName, which searches ALL descendants —
-        // some maps nest geometry elements (e.g. <Line> inside <Label>). Use
-        // Descendants throughout to match.
-
-        // Infills
-        foreach (var infillElem in mapElem.Descendants("Infill"))
-        {
-            var infillName = infillElem.Attribute("Name")?.Value ?? "";
-            var infillType = infillElem.Attribute("Type")?.Value ?? "";
-            var infillPattern = infillElem.Attribute("Pattern")?.Value ?? mapPattern;
-            var rawText = infillElem.Element("Point")?.Value ?? "";
-            if (string.IsNullOrWhiteSpace(rawText))
-                rawText = infillElem.Value;
-
-            var poly = new GroundMapData.InfillPolygon { Name = infillName, InfillType = infillType, Pattern = infillPattern };
-            foreach (var part in rawText.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                var trimmed = part.Trim();
-                if (trimmed.Length == 0) continue;
-                var (lat, lon) = ResolvePoint(trimmed);
-                if (lat != 0 || lon != 0)
-                    poly.Points.Add(new[] { Math.Round(lat, 8), Math.Round(lon, 8) });
-            }
-            if (poly.Points.Count >= 3)
-                layer.Infills.Add(poly);
-        }
-
-        // Lines
-        foreach (var lineElem in mapElem.Descendants("Line"))
-        {
-            var lineName = lineElem.Attribute("Name")?.Value ?? "";
-            var linePattern = lineElem.Attribute("Pattern")?.Value ?? mapPattern;
-            var lineWidth = double.TryParse(lineElem.Attribute("Width")?.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) ? w : 1.0;
-
-            // Collect all coordinate text from the Line element
-            string rawText;
-            var pointElem = lineElem.Element("Point");
-            if (pointElem is not null)
-            {
-                // Single <Point> child wrapping slash-separated coords
-                rawText = pointElem.Value;
-            }
-            else
-            {
-                // Direct text content in <Line> element
-                rawText = lineElem.Value;
-            }
-
-            if (!string.IsNullOrWhiteSpace(rawText))
-            {
-                var line = new GroundMapData.MapLine { Name = lineName, Pattern = linePattern, Width = lineWidth };
-                // Airway route format "CS VOR.A216.HOOVR" — vatSys DisplayMaps.LoadMaps
-                // detects it with this exact regex; anything else is slash-separated
-                // coordinates or waypoint names.
-                bool isRoute = RouteRegex.IsMatch(rawText.Trim());
-                if (isRoute)
-                {
-                    // Route: split by dots and resolve each named fix
-                    foreach (var fixName in rawText.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var trimmed = fixName.Trim();
-                        if (trimmed.Length == 0) continue;
-                        var (lat, lon) = ResolveNamedFix(trimmed);
-                        if (lat != 0 || lon != 0)
-                            line.Points.Add(new[] { Math.Round(lat, 8), Math.Round(lon, 8) });
-                    }
-                }
-                else
-                {
-                    // Slash-separated: coordinates or waypoint names
-                    foreach (var part in rawText.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var trimmed = part.Trim();
-                        if (trimmed.Length == 0) continue;
-                        var (lat, lon) = ResolvePoint(trimmed);
-                        if (lat != 0 || lon != 0)
-                            line.Points.Add(new[] { Math.Round(lat, 8), Math.Round(lon, 8) });
-                    }
-                }
-                if (line.Points.Count >= 2)
-                    layer.Lines.Add(line);
-            }
-        }
-
-        // Symbols
-        foreach (var symElem in mapElem.Descendants("Symbol"))
-        {
-            var symType = symElem.Attribute("Type")?.Value ?? "DotFillCircle";
-            foreach (var ptElem in symElem.Elements("Point"))
-            {
-                var ptText = ptElem.Value.Trim();
-                if (ptText.Length == 0) continue;
-                var (lat, lon) = ResolvePoint(ptText);
-                if (lat != 0 || lon != 0)
-                    layer.Symbols.Add(new GroundMapData.MapSymbol { SymbolType = symType, Lat = lat, Lon = lon });
-            }
-        }
-
-        // Labels
-        foreach (var labelElem in mapElem.Descendants("Label"))
-        {
-            foreach (var ptElem in labelElem.Elements("Point"))
-            {
-                var text = ptElem.Attribute("Name")?.Value ?? "";
-                var ptText = ptElem.Value.Trim();
-                if (ptText.Length == 0) continue;
-
-                // If no Name attribute, the text content IS the waypoint name (used as both label and lookup)
-                if (string.IsNullOrWhiteSpace(text))
-                    text = ptText;
-
-                var (lat, lon) = ResolvePoint(ptText);
-                if (lat != 0 || lon != 0)
-                    layer.Labels.Add(new GroundMapData.MapLabel { Text = text, Lat = lat, Lon = lon });
-            }
-        }
-
-        // Runways — draw as lines with extended centerlines
-        foreach (var rwyElem in mapElem.Descendants("Runway"))
-        {
-            var thresholds = rwyElem.Elements("Threshold").ToList();
-            if (thresholds.Count < 2) continue;
-
-            var pos1Str = thresholds[0].Attribute("Position")?.Value ?? "";
-            var pos2Str = thresholds[1].Attribute("Position")?.Value ?? "";
-            var (lat1, lon1) = GroundMapData.ParseCoordinate(pos1Str);
-            var (lat2, lon2) = GroundMapData.ParseCoordinate(pos2Str);
-            if (lat1 == 0 && lon1 == 0) continue;
-            if (lat2 == 0 && lon2 == 0) continue;
-
-            // Runway outline
-            layer.Lines.Add(new GroundMapData.MapLine
-            {
-                Name = rwyElem.Attribute("Name")?.Value ?? "",
-                Points = { new[] { Math.Round(lat1, 8), Math.Round(lon1, 8) }, new[] { Math.Round(lat2, 8), Math.Round(lon2, 8) } }
-            });
-
-            // Extended centerlines for each threshold
-            foreach (var thr in thresholds)
-            {
-                var posStr = thr.Attribute("Position")?.Value ?? "";
-                var trackStr = thr.Attribute("ExtendedCentrelineTrack")?.Value ?? "";
-                var lenStr = thr.Attribute("ExtendedCentrelineLength")?.Value ?? "";
-                var tickStr = thr.Attribute("ExtendedCentrelineTickInterval")?.Value ?? "";
-
-                if (string.IsNullOrEmpty(trackStr) || string.IsNullOrEmpty(lenStr)) continue;
-
-                var (tLat, tLon) = GroundMapData.ParseCoordinate(posStr);
-                if (tLat == 0 && tLon == 0) continue;
-                if (!double.TryParse(trackStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var track)) continue;
-                if (!double.TryParse(lenStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var lenNm)) continue;
-
-                var trackRad = track * Math.PI / 180.0;
-                var endLat = tLat + Math.Cos(trackRad) * lenNm / 60.0;
-                var endLon = tLon + Math.Sin(trackRad) * lenNm / (60.0 * Math.Cos(tLat * Math.PI / 180.0));
-
-                layer.Lines.Add(new GroundMapData.MapLine
-                {
-                    Name = thr.Attribute("Name")?.Value ?? "",
-                    Pattern = "Dashed",
-                    Points = { new[] { Math.Round(tLat, 8), Math.Round(tLon, 8) }, new[] { Math.Round(endLat, 8), Math.Round(endLon, 8) } }
-                });
-
-                // Tick marks along the extended centerline
-                if (double.TryParse(tickStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var tickNm) && tickNm > 0)
-                {
-                    var perpRad = trackRad + Math.PI / 2.0;
-                    var tickHalf = 0.3 / 60.0; // ~0.3nm half-tick
-                    for (var d = tickNm; d <= lenNm; d += tickNm)
-                    {
-                        var mLat = tLat + Math.Cos(trackRad) * d / 60.0;
-                        var mLon = tLon + Math.Sin(trackRad) * d / (60.0 * Math.Cos(tLat * Math.PI / 180.0));
-                        var cosMLat = Math.Cos(mLat * Math.PI / 180.0);
-                        var t1Lat = mLat + Math.Cos(perpRad) * tickHalf;
-                        var t1Lon = mLon + Math.Sin(perpRad) * tickHalf / cosMLat;
-                        var t2Lat = mLat - Math.Cos(perpRad) * tickHalf;
-                        var t2Lon = mLon - Math.Sin(perpRad) * tickHalf / cosMLat;
-                        layer.Lines.Add(new GroundMapData.MapLine
-                        {
-                            Points = { new[] { Math.Round(t1Lat, 8), Math.Round(t1Lon, 8) }, new[] { Math.Round(t2Lat, 8), Math.Round(t2Lon, 8) } }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>Tries to parse as coordinate first, then falls back to named fix resolution.</summary>
-    private static (double lat, double lon) ResolvePoint(string text)
-    {
-        // Try coordinate parse first
-        var (lat, lon) = GroundMapData.ParseCoordinate(text);
-        if (lat != 0 || lon != 0) return (lat, lon);
-
-        // Try named fix resolution
-        return ResolveNamedFix(text);
-    }
-
-    /// <summary>Resolves a named fix/navaid/waypoint to coordinates via vatSys.</summary>
-    private static (double lat, double lon) ResolveNamedFix(string name)
-    {
-        try
-        {
-            var intersection = Airspace2.GetIntersection(name.Trim());
-            if (intersection?.LatLong is not null)
-                return (intersection.LatLong.Latitude, intersection.LatLong.Longitude);
-        }
-        catch { }
-        return (0, 0);
-    }
-
     // ---- Profile resolution (same logic as GroundDataService) ----
 
     private void EnsureProfileDir()
@@ -828,7 +443,6 @@ public sealed class AsdDataService
             // First resolution or profile changed — clear caches and re-resolve
             _positions = null;
             _colours = null;
-            _asdMaps = null;
 
             _profileDir = ProfileLocator.Resolve();
             _profileName = currentName;
@@ -859,6 +473,5 @@ public sealed class AsdAircraftDto
     public string WakeCat { get; set; } = "";
     public string AircraftType { get; set; } = "";
     public string Runway { get; set; } = "";
-    public string Destination { get; set; } = "";
     public double[][]? History { get; set; }
 }
