@@ -1,0 +1,146 @@
+/* A vatSys ASD / Ground window: BaseForm frame, MenuStrip and the ASD control.
+   Colours are the profile's (set from /api/state); these are the Australia defaults. */
+:root {
+  --win-bg: rgb(160,170,170);        /* WindowBackground */
+  --win-border: rgb(105,105,105);    /* WindowBorder */
+  --win-text: rgb(96,0,0);           /* GenericText */
+  --win-interactive: rgb(0,0,96);    /* InteractiveText */
+  --win-depressed: rgb(130,146,146); /* WindowButtonDepressed */
+  --win-selected: rgb(0,0,96);       /* WindowButtonSelected */
+  --view-bg: rgb(127,127,127);
+  /* ControlPaint.DrawBorder3D uses the Windows system colours, not the profile's */
+  --sys-light: rgb(227,227,227);     /* COLOR_3DLIGHT */
+  --sys-hilight: rgb(255,255,255);   /* COLOR_3DHILIGHT */
+  --sys-shadow: rgb(160,160,160);    /* COLOR_3DSHADOW */
+  --sys-dkshadow: rgb(105,105,105);  /* COLOR_3DDKSHADOW */
+}
+
+@font-face {
+  font-family: 'Terminus';
+  src: url('/font.ttf') format('truetype'), local('Terminus (TTF)'), local('TerminusTTF-Bold'), local('Terminus (TTF) Bold');
+  font-weight: bold;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  background: var(--win-border);
+  font: bold 16px 'Terminus', 'Consolas', 'Courier New', monospace;
+  color: var(--win-interactive);
+}
+
+body {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* BaseForm non-client area: BorderThickness 2 on the sides and bottom; above the
+   client area 2px of border, the 22px title strip, a black line (the Outset
+   bottom edge) and one more border row: 26px in all. */
+#win {
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column;
+  background: var(--win-border);
+  padding: 2px 2px 2px 2px;
+}
+
+#titlebar {
+  position: relative; flex: 0 0 24px; height: 24px;
+  background: var(--win-bg);
+  border-bottom: 1px solid var(--win-border);
+  overflow: visible;
+}
+#titlebar::after { /* ControlPaint.DrawBorder ... Outset, bottom edge, width 1 */
+  content: ''; position: absolute; left: 0; right: 0; top: 22px; height: 1px; background: #000;
+}
+#title {
+  position: absolute; left: 0; right: 0; top: 0; height: 23px;
+  text-align: center; line-height: 23px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--win-text);
+  pointer-events: none;
+}
+#title.narrow { left: 23px; right: 69px; }
+
+/* Title bar buttons: 23x23, drawn 1px into the frame on the outer side */
+.tb-btn { position: absolute; top: 0; width: 23px; height: 23px; cursor: default; z-index: 1; }
+.tb-btn svg { display: block; }
+.tb-btn:hover { background: var(--win-depressed); }
+.tb-btn:active {
+  background: var(--win-depressed);
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+#tb-sendback { left: -1px; }
+#tb-close { right: -1px; }
+#tb-max { right: 22px; }
+#tb-min { right: 45px; }
+.ico-stroke { stroke: var(--win-interactive); stroke-width: 1; }
+.ico-stroke2 { stroke: var(--win-interactive); stroke-width: 2; fill: none; }
+.ico-fill { fill: var(--win-interactive); }
+.ico-back { fill: var(--win-bg); }
+.ico-none { fill: none; }
+
+/* MenuStrip: 25px, Padding(8,3,0,3), Border3DStyle.RaisedOuter */
+#menubar {
+  position: relative; flex: 0 0 25px; height: 25px; z-index: 50;
+  background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-light), inset -1px -1px 0 var(--sys-dkshadow);
+  padding: 3px 0 3px 8px;
+  display: flex; align-items: stretch; white-space: nowrap;
+}
+.menu-top {
+  position: relative; height: 19px; line-height: 19px; padding: 0 8px; cursor: default;
+  color: var(--win-interactive);
+}
+.menu-top:hover { background: var(--win-depressed); }
+.menu-top.open { background: var(--win-depressed); box-shadow: inset 1px 1px 0 var(--sys-dkshadow), inset -1px -1px 0 var(--sys-light); }
+
+/* ToolStripDropDownMenu: RaisedOuter border, Padding(…,2,1,2), 22px items */
+.menu-drop {
+  display: none; position: absolute; z-index: 60;
+  background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-light), inset -1px -1px 0 var(--sys-dkshadow);
+  padding: 2px 1px 2px 1px;
+  max-height: calc(100vh - 60px); overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  white-space: nowrap;
+  scrollbar-width: none; /* a long menu scrolls by wheel or drag, as the WinForms one does by its arrows */
+}
+.menu-drop::-webkit-scrollbar { display: none; }
+.menu-drop.show { display: block; }
+.menu-item {
+  position: relative; display: flex; align-items: center; height: 22px; line-height: 22px;
+  padding: 0 27px 0 8px; cursor: default;
+  color: var(--win-interactive);
+}
+.margin .menu-item { padding-left: 33px; }
+.menu-item:hover, .menu-item.open { background: var(--win-depressed); }
+.menu-item.open { box-shadow: inset 1px 1px 0 var(--sys-dkshadow), inset -1px -1px 0 var(--sys-light); }
+.menu-item.disabled { color: var(--win-text); }
+.menu-item.disabled:hover { background: transparent; }
+/* MenuCheckMarkStyles.Default: a checked item is drawn "pressed in" in the selected colour */
+.menu-item.checked {
+  background: var(--win-selected); color: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-dkshadow), inset -1px -1px 0 var(--sys-light);
+}
+.menu-item.checked:hover {
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+/* MenuCheckMarkStyles.Traditional: a tick in the image margin, normal colours */
+.margin .menu-item.checked { background: transparent; color: var(--win-interactive); box-shadow: none; }
+.margin .menu-item.checked:hover { background: var(--win-depressed); }
+.margin .menu-item.checked::before {
+  content: ''; position: absolute; left: 9px; top: 5px; width: 5px; height: 9px;
+  border: solid var(--win-interactive); border-width: 0 2px 2px 0; transform: rotate(40deg);
+}
+/* Submenu arrow: a 4x8 triangle in the arrow column */
+.menu-item.sub::after {
+  content: ''; position: absolute; right: 11px; top: 7px;
+  border: 4px solid transparent; border-left-color: currentColor; border-right-width: 0;
+}
+.menu-sep { height: 6px; position: relative; }
+.menu-sep::after { content: ''; position: absolute; left: 3px; right: 3px; top: 2px; height: 1px; background: var(--sys-shadow); box-shadow: 0 1px 0 var(--sys-hilight); }
+
+#view { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--view-bg); }
+#cv { position: absolute; left: 0; top: 0; display: block; touch-action: none; cursor: crosshair; }
+#view.interactive #cv { cursor: cell; }

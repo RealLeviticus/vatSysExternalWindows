@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>vatSys</title>
+<link rel="stylesheet" href="/display.css">
+</head>
+<body>
+<!-- A vatSys BaseForm: 2px border, title bar, MenuStrip, then the ASD control -->
+<div id="win">
+  <div id="titlebar">
+    <div class="tb-btn" id="tb-sendback"><svg width="23" height="23" shape-rendering="crispEdges">
+      <rect class="ico-fill" x="3" y="3" width="9" height="9"/>
+      <rect class="ico-back ico-stroke" x="11.5" y="11.5" width="9" height="9"/></svg></div>
+    <div id="title"></div>
+    <div class="tb-btn" id="tb-min"><svg width="23" height="23" shape-rendering="crispEdges">
+      <line class="ico-stroke" x1="5" y1="17.5" x2="18" y2="17.5"/></svg></div>
+    <div class="tb-btn" id="tb-max"><svg width="23" height="23" shape-rendering="crispEdges">
+      <g id="ico-max"><rect class="ico-stroke ico-none" x="5.5" y="5.5" width="13" height="13"/>
+        <line class="ico-stroke" x1="5" y1="6.5" x2="18" y2="6.5"/></g>
+      <g id="ico-restore" style="display:none">
+        <rect class="ico-stroke ico-none" x="8.5" y="5.5" width="10" height="9"/>
+        <line class="ico-stroke" x1="8" y1="6.5" x2="18" y2="6.5"/>
+        <rect class="ico-stroke ico-fill" x="5.5" y="8.5" width="10" height="9"/></g></svg></div>
+    <div class="tb-btn" id="tb-close"><svg width="23" height="23">
+      <path class="ico-stroke2" d="M5 5L18 18M18 5L5 18"/></svg></div>
+  </div>
+  <div id="menubar"></div>
+  <div id="view"><canvas id="cv"></canvas></div>
+</div>
+<script src="/display.js"></script>
+<script src="/display-ui.js"></script>
+</body>
+</html>

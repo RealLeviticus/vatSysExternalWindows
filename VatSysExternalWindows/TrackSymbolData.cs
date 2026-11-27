@@ -96,12 +96,13 @@ public static class TrackSymbolData
         if (profileDoc is not null)
             LoadSymbols(profileDoc, result);
 
-        // vatSys backfills any symbol type the profile doesn't define from DefaultTracks.xml
+        // vatSys backfills any symbol type the profile has no default (non-SpecialCode)
+        // variant of from DefaultTracks.xml
         if (defaultDoc is not null)
         {
             foreach (var type in SymbolTypes)
             {
-                if (result.Any(s => s.Type.Equals(type, StringComparison.OrdinalIgnoreCase)))
+                if (result.Any(s => s.Type.Equals(type, StringComparison.OrdinalIgnoreCase) && s.SpecialCode == -1))
                     continue;
 
                 var elem = defaultDoc.Root?.Elements("TrackSymbol")
