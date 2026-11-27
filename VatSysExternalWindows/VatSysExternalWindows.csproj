@@ -10,10 +10,10 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <RootNamespace>VatSysExternalWindows</RootNamespace>
     <AssemblyName>VatSysExternalWindows</AssemblyName>
-    <Version>1.0.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
-    <InformationalVersion>1.0.0.0</InformationalVersion>
+    <Version>2.0.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <InformationalVersion>2.0.0.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ProgramFilesX86 Condition="'$(ProgramFilesX86)' == ''">C:\Program Files (x86)</ProgramFilesX86>
     <VatSysDir Condition="'$(VatSysDir)' == ''">$(ProgramFilesX86)\vatSys</VatSysDir>
@@ -27,8 +27,18 @@
       <HintPath>$(VatSysExe)</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Colours.GetColourDX returns a SharpDX colour; vatSys ships the assembly -->
+    <Reference Include="SharpDX.Mathematics">
+      <HintPath>$(VatSysDir)\bin\SharpDX.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="System.ComponentModel.Composition" />
     <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <!-- The window page (HTML, CSS, JavaScript) is embedded so the plugin stays a single DLL -->
+  <ItemGroup>
+    <EmbeddedResource Include="Web\**\*" LogicalName="Web/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <Target Name="ValidateVatSysReference" BeforeTargets="ResolveReferences">

@@ -10,17 +10,15 @@ public sealed class ExternalWindowsPlugin : IPlugin, IDisposable
 {
     private const int WebPort = 5300;
 
-    private readonly GroundDataService _data;
-    private readonly AsdDataService _asd;
+    private readonly WindowDataService _data;
     private readonly EmbeddedWebServer _server;
 
     private bool _disposed;
 
     public ExternalWindowsPlugin()
     {
-        _data = new GroundDataService();
-        _asd = new AsdDataService();
-        _server = new EmbeddedWebServer(_data, _asd, WebPort);
+        _data = new WindowDataService();
+        _server = new EmbeddedWebServer(_data, WebPort);
 
         try
         {

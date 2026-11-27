@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using vatsys;
 
@@ -24,6 +25,9 @@ public sealed class MapLayer
     public string Name { get; set; } = "";
     public string Folder { get; set; } = "";
     public int Priority { get; set; }
+    /// <summary>The map's index in DisplayMaps.Maps. vatSys paints the visible maps
+    /// in that list's order (sorted once by priority when the profile loads).</summary>
+    public int Order { get; set; }
     public string CustomColour { get; set; } = "";
     public List<MapInfill> Infills { get; set; } = new();
     public List<MapLine> Lines { get; set; } = new();
@@ -107,8 +111,9 @@ public static class MapSource
         return string.IsNullOrEmpty(map.Folder) ? map.Name : map.Folder + "/" + map.Name;
     }
 
-    /// <summary>Metadata for every map of a category, sorted by folder then name.
-    /// Empty until vatSys has finished loading the profile's maps.</summary>
+    /// <summary>Metadata for every map of a category, sorted by folder then name as
+    /// the vatSys Maps menu sorts them. Empty until vatSys has finished loading the
+    /// profile's maps.</summary>
     public static List<MapMeta> ListMaps(DisplayMaps.MapCategories category)
     {
         var result = new List<MapMeta>();
@@ -124,7 +129,8 @@ public static class MapSource
             try { centre = map.Center; } catch { }
             Coordinate? mainCentre = null;
             try { mainCentre = MMI.MainASDCentre; } catch { }
-            if (centre is not null && !ReferenceEquals(centre, mainCentre) && IsValid(centre))
+            if (centre is not null && !ReferenceEquals(centre, mainCentre) && IsValid(centre) &&
+                (centre.Latitude != 0 || centre.Longitude != 0))
             {
                 meta.CenterLat = Math.Round(centre.Latitude, 7);
                 meta.CenterLon = Math.Round(centre.Longitude, 7);
@@ -133,33 +139,36 @@ public static class MapSource
             result.Add(meta);
         }
 
-        result.Sort((a, b) =>
-        {
-            var fc = string.Compare(a.Folder, b.Folder, StringComparison.OrdinalIgnoreCase);
-            return fc != 0 ? fc : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
-        });
-        return result;
+        // The menu uses LINQ orderby on the strings (the current culture's order)
+        return result.OrderBy(m => m.Folder).ThenBy(m => m.Name).ToList();
     }
 
-    /// <summary>Geometry for the maps identified by "Folder/Name" keys, sorted by
-    /// priority descending (vatSys draws higher priority first, i.e. behind).</summary>
-    public static List<MapLayer> GetLayers(DisplayMaps.MapCategories category, IEnumerable<string> keys)
+    /// <summary>Geometry for the maps identified by "Folder/Name" keys, whatever
+    /// their category: a position may list maps of the other window type and vatSys
+    /// paints those too. Each layer carries its paint order.</summary>
+    public static List<MapLayer> GetLayers(IEnumerable<string> keys)
     {
         var result = new List<MapLayer>();
         var needed = new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
         if (needed.Count == 0) return result;
 
-        foreach (var map in Snapshot())
+        var maps = Snapshot();
+        for (var i = 0; i < maps.Length && needed.Count > 0; i++)
         {
-            if (needed.Count == 0) break;
-            if (map.Category != category || string.IsNullOrEmpty(map.Name)) continue;
+            var map = maps[i];
+            if (map is null || string.IsNullOrEmpty(map.Name)) continue;
             if (!needed.Remove(Key(map))) continue;
 
-            var layer = ToLayer(map);
-            if (layer is not null) result.Add(layer);
+            // A map with nothing to draw is still returned, so the page stops asking for it
+            var layer = ToLayer(map) ?? new MapLayer
+            {
+                Type = map.Type.ToString(), Name = map.Name, Folder = map.Folder ?? "",
+                Priority = map.Priority, CustomColour = map.CustomColourName ?? "",
+            };
+            layer.Order = i;
+            result.Add(layer);
         }
 
-        result.Sort((a, b) => b.Priority.CompareTo(a.Priority));
         return result;
     }
 
@@ -302,13 +311,112 @@ public static class MapSource
         return new[] { Math.Round(c.Latitude, 7), Math.Round(c.Longitude, 7) };
     }
 
+    /// <summary>Usable in JSON. A fix name vatSys could not resolve stays in the
+    /// geometry as 0N 0E, exactly as vatSys draws it.</summary>
     private static bool IsValid(Coordinate? c)
     {
         if (c is null) return false;
         var lat = c.Latitude;
         var lon = c.Longitude;
-        if (double.IsNaN(lat) || double.IsNaN(lon) || double.IsInfinity(lat) || double.IsInfinity(lon)) return false;
-        return lat != 0 || lon != 0;
+        return !(double.IsNaN(lat) || double.IsNaN(lon) || double.IsInfinity(lat) || double.IsInfinity(lon));
+    }
+}
+
+/// <summary>A logical position as vatSys loaded it from Positions.xml.</summary>
+public sealed class PositionDto
+{
+    public string Name { get; set; } = "";
+    public string Group { get; set; } = "";
+    /// <summary>ASMGCS positions: the airport the Ground window is for.</summary>
+    public string Airport { get; set; } = "";
+    public double CenterLat { get; set; }
+    public double CenterLon { get; set; }
+    public int DefaultRange { get; set; }
+    public double Rotation { get; set; }
+    public double MagneticVariation { get; set; }
+    /// <summary>Keys of the maps the position shows.</summary>
+    public List<string> MapRefs { get; set; } = new();
+}
+
+/// <summary>Positions and runtime maps, read from vatSys's own state.</summary>
+public static class PositionSource
+{
+    /// <summary>The positions of one type, in the order of the vatSys Position menu:
+    /// by name within each group (the page builds the group submenus).</summary>
+    public static List<PositionDto> List(LogicalPositions.PositionTypes type)
+    {
+        var result = new List<PositionDto>();
+        try
+        {
+            foreach (var p in LogicalPositions.Positions.Where(p => p != null && p.Type == type).OrderBy(p => p.Name).ToList())
+            {
+                var centre = p.DefaultCenter;
+                var dto = new PositionDto
+                {
+                    Name = p.Name ?? "",
+                    Group = p.Group ?? "",
+                    Airport = p.ASMGCSAirport?.ICAOName ?? "",
+                    CenterLat = centre?.Latitude ?? 0,
+                    CenterLon = centre?.Longitude ?? 0,
+                    DefaultRange = p.DefaultRange,
+                    Rotation = p.Rotation,
+                    MagneticVariation = p.MagneticVariation,
+                };
+                if (p.Maps != null)
+                {
+                    foreach (var map in p.Maps)
+                    {
+                        if (map != null && !string.IsNullOrEmpty(map.Name)) dto.MapRefs.Add(MapSource.Key(map));
+                    }
+                }
+                result.Add(dto);
+            }
+        }
+        catch { }
+        return result;
+    }
+}
+
+/// <summary>Runtime maps vatSys paints on its windows, in vatSys's paint order.</summary>
+public sealed class DynamicMaps
+{
+    /// <summary>Painted before the file maps (ASD only): the controlled-sector
+    /// infill, when the user's Dynamic Infill setting is on, then the active
+    /// restricted-area infills.</summary>
+    public List<MapLayer> Below { get; set; } = new();
+    /// <summary>Painted after the file maps (ASD and Ground): active
+    /// restricted-area outlines.</summary>
+    public List<MapLayer> Above { get; set; } = new();
+
+    private static volatile DynamicMaps _snapshot = new();
+
+    /// <summary>The dynamic maps as vatSys currently has them. They belong to the
+    /// GUI thread, so they are read there; if the GUI is busy the previous
+    /// snapshot is served.</summary>
+    public static DynamicMaps Get()
+    {
+        GuiThread.Run(() => _snapshot = Compute());
+        return _snapshot;
+    }
+
+    private static DynamicMaps Compute()
+    {
+        var result = new DynamicMaps();
+        var infillOn = true;
+        try { infillOn = MMI.DynamicInfill; } catch { }
+        if (infillOn)
+        {
+            try { Add(result.Below, DisplayMaps.DynamicInfill); } catch { }
+        }
+        try { Add(result.Below, DisplayMaps.DynamicRestrictedAreaInfills); } catch { }
+        try { Add(result.Above, DisplayMaps.DynamicRestrictedAreas); } catch { }
+        return result;
+    }
+
+    private static void Add(List<MapLayer> list, DisplayMaps.Map? map)
+    {
+        var layer = MapSource.ToLayer(map);
+        if (layer is not null) list.Add(layer);
     }
 }
 

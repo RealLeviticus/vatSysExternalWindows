@@ -23,8 +23,12 @@ public sealed class LabelDto
     public int Rows { get; set; }
     /// <summary>Rows above the leader end that the box starts at.</summary>
     public int AnchorRow { get; set; }
-    /// <summary>The whole label (leader included) is hidden during the flash phase.</summary>
+    /// <summary>On the flash phase vatSys paints the label with a transparent track
+    /// brush: the leader and everything in the track colour disappear, and the
+    /// lines in <see cref="Flash"/> / <see cref="SharedFlash"/> are what is left.</summary>
     public bool Blink { get; set; }
+    public List<LabelLineDto>? Flash { get; set; }
+    public List<LabelLineDto>? SharedFlash { get; set; }
     /// <summary>Leader line colour.</summary>
     public int[] Col { get; set; } = { 0, 0, 0 };
     public List<LabelLineDto> Lines { get; set; } = new();
@@ -33,8 +37,10 @@ public sealed class LabelDto
     public List<LabelLineDto>? Shared { get; set; }
     /// <summary>Alert box colour, or null for no box.</summary>
     public int[]? Box { get; set; }
-    /// <summary>Alert box width in characters (the widest line).</summary>
+    /// <summary>The widest painted line, in characters, for the alert box: of
+    /// <see cref="Lines"/> and of <see cref="Shared"/>.</summary>
     public int BoxWidth { get; set; }
+    public int SharedBoxWidth { get; set; }
 }
 
 public sealed class LabelLineDto
@@ -57,7 +63,8 @@ public sealed class LabelCellDto
 public sealed class LabelRunDto
 {
     public string T { get; set; } = "";
-    public int[] C { get; set; } = { 0, 0, 0 };
+    /// <summary>Text colour; null when only the border is painted.</summary>
+    public int[]? C { get; set; }
     /// <summary>Offset inside the cell: Dx characters (truncated to pixels) plus Px pixels,
     /// and Dy row heights vertically.</summary>
     public double Dx { get; set; }
@@ -77,19 +84,18 @@ internal static class TrackLabelBuilder
 {
     private static readonly Regex StatusRemark = new(@"\bSTS\/\w+\b", RegexOptions.Compiled);
 
-    public static int[] Rgb(Color c) => new[] { (int)c.R, (int)c.G, (int)c.B };
+    /// <summary>[r, g, b], or [r, g, b, a] when not opaque (plugin colours can carry alpha).</summary>
+    public static int[] Rgb(Color c) => TrackBuilder.Rgba(c);
 
-    public static Color Colour(Colours.Identities id)
-    {
-        try { return Colours.GetColour(id); } catch { return Color.Black; }
-    }
+    /// <summary>Colours.GetColourDX: the brightness-adjusted colour vatSys paints with.</summary>
+    public static Color Colour(Colours.Identities id) => VatColours.Dx(id);
 
     /// <param name="isAsmgcs">Ground window label (uses the track's ASMGCS label position).</param>
     /// <param name="labelType">Labels.LabelTypes name.</param>
     /// <param name="trackColour">The brush PaintLabel is given (already swapped to the
     /// non-jurisdiction label colour where vatSys does that).</param>
     public static LabelDto? Build(bool isAsmgcs, Track tl, FDP2.FDR? fdr, QuickTag? qt, RDP.RadarTrack? rt,
-        NetworkPilot? pilot, string labelType, Color trackColour)
+        NetworkPilot? pilot, string labelType, Color trackColour, bool blink = false)
     {
         var def = VatSysInternals.FindLabel(labelType);
         if (def is null) return null;
@@ -138,6 +144,13 @@ internal static class TrackLabelBuilder
         label.Lines = BuildLines(def, baseLines, context, out var widest);
         label.BoxWidth = widest;
 
+        // The same lines as PaintLabel leaves them when handed the transparent brush
+        var flashContext = blink
+            ? new Context(tl, fdr, qt, rt, pilot, labelType, Color.Transparent, alert, alert2, priority)
+            : null;
+        label.Blink = blink;
+        if (flashContext != null) label.Flash = Remaining(BuildLines(def, baseLines, flashContext, out _));
+
         // Shared lines replace the line they are shared with on the timeshare phase
         var sharedOn = false;
         try { sharedOn = MMI.SharedLabels; } catch { }
@@ -149,7 +162,9 @@ internal static class TrackLabelBuilder
                 var index = swapped.FindIndex(l => l.Id == line.SharedId);
                 if (index >= 0) swapped[index] = line;
             }
-            label.Shared = BuildLines(def, swapped, context, out _);
+            label.Shared = BuildLines(def, swapped, context, out var sharedWidest);
+            label.SharedBoxWidth = sharedWidest;
+            if (flashContext != null) label.SharedFlash = Remaining(BuildLines(def, swapped, flashContext, out _));
         }
 
         var state = tl.State;
@@ -162,6 +177,12 @@ internal static class TrackLabelBuilder
         }
 
         return label;
+    }
+
+    /// <summary>Flash-phase lines, or an empty list when nothing in them is painted.</summary>
+    private static List<LabelLineDto> Remaining(List<LabelLineDto> lines)
+    {
+        return lines.Exists(l => l.Cells.Count > 0) ? lines : new List<LabelLineDto>();
     }
 
     private static bool IsLineVisible(LabelLineDef line, Track track, FDP2.FDR? fdr)
@@ -257,13 +278,18 @@ internal static class TrackLabelBuilder
         var rt = c.Radar;
         var trackCol = c.TrackColour;
 
-        // Item colours: the track colour unless the item, or the alert priority, overrides it
+        // Item colours: the track colour unless the item, or the alert priority,
+        // overrides it. With the transparent (flash) brush the item's own colours
+        // are not applied; the alert-priority ones still are.
         var itemCol = trackCol;
         var borderCol = trackCol;
         Color? backCol = null;
-        if (item.Colour != Colours.Identities.Default) itemCol = Colour(item.Colour);
-        if (item.BorderColour != Colours.Identities.Default) borderCol = Colour(item.BorderColour);
-        if (item.BackColour != Colours.Identities.Default) backCol = Colour(item.BackColour);
+        if (trackCol.A != 0)
+        {
+            if (item.Colour != Colours.Identities.Default) itemCol = Colour(item.Colour);
+            if (item.BorderColour != Colours.Identities.Default) borderCol = Colour(item.BorderColour);
+            if (item.BackColour != Colours.Identities.Default) backCol = Colour(item.BackColour);
+        }
         if (c.Priority >= 1 && c.Priority <= 4)
         {
             var p = c.Priority - 1;
@@ -287,16 +313,19 @@ internal static class TrackLabelBuilder
 
         void Fill(LabelCellDto cell)
         {
-            if (hasBack && backCol.HasValue) cell.Back = Rgb(backCol.Value);
+            if (hasBack && backCol.HasValue && backCol.Value.A != 0) cell.Back = Rgb(backCol.Value);
         }
 
         void Text(LabelCellDto cell, string? text, Color colour, double dx = 0, int px = 0, double dy = 0)
         {
             if (string.IsNullOrEmpty(text)) return;
+            var drawText = colour.A != 0;
+            var drawBorder = border != BorderFlags.None && borderCol.A != 0;
+            if (!drawText && !drawBorder) return;
             cell.Runs.Add(new LabelRunDto
             {
-                T = text!, C = Rgb(colour), Dx = dx, Px = px, Dy = dy,
-                B = (int)border, BC = border == BorderFlags.None ? null : Rgb(borderCol),
+                T = text!, C = drawText ? Rgb(colour) : null, Dx = dx, Px = px, Dy = dy,
+                B = drawBorder ? (int)border : 0, BC = drawBorder ? Rgb(borderCol) : null,
             });
         }
 
@@ -311,9 +340,12 @@ internal static class TrackLabelBuilder
                 var text = "";
                 if (custom != null)
                 {
-                    itemCol = CustomColour(custom.ForeColourIdentity, custom.CustomForeColour, itemCol);
-                    backCol = CustomColour(custom.BackColourIdentity, custom.CustomBackColour, backCol ?? Color.Transparent);
-                    borderCol = CustomColour(custom.BorderColourIdentity, custom.CustomBorderColour, borderCol);
+                    if (itemCol.A != 0)
+                    {
+                        itemCol = CustomColour(custom.ForeColourIdentity, custom.CustomForeColour, itemCol);
+                        backCol = CustomColour(custom.BackColourIdentity, custom.CustomBackColour, backCol ?? Color.Transparent);
+                        borderCol = CustomColour(custom.BorderColourIdentity, custom.CustomBorderColour, borderCol);
+                    }
                     text = custom.Text ?? "";
                     border = custom.Border;
                 }
@@ -797,7 +829,7 @@ internal static class TrackLabelBuilder
             case Colours.Identities.State:
                 return current;
             case Colours.Identities.Custom:
-                return custom is null ? current : Color.FromArgb(custom.R, custom.G, custom.B);
+                return custom is null ? current : Color.FromArgb(custom.A, custom.R, custom.G, custom.B);
             default:
                 return Colour(identity);
         }

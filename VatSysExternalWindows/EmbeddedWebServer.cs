@@ -10,6 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
+using vatsys;
 
 namespace VatSysExternalWindows;
 
@@ -26,11 +27,8 @@ public sealed class EmbeddedWebServer : IDisposable
 
     private static readonly byte[] HeaderEnd = { 13, 10, 13, 10 };
     private static readonly byte[] LandingBytes = Encoding.UTF8.GetBytes(LandingPage.Html);
-    private static readonly byte[] GroundBytes = Encoding.UTF8.GetBytes(WebUiPage.Html);
-    private static readonly byte[] AsdBytes = Encoding.UTF8.GetBytes(AsdUiPage.Html);
 
-    private readonly GroundDataService _data;
-    private readonly AsdDataService _asd;
+    private readonly WindowDataService _data;
     private readonly JavaScriptSerializer _json;
     private readonly CancellationTokenSource _cts;
     private readonly int _port;
@@ -42,10 +40,9 @@ public sealed class EmbeddedWebServer : IDisposable
     private Task? _loop;
     private bool _disposed;
 
-    public EmbeddedWebServer(GroundDataService data, AsdDataService asd, int port)
+    public EmbeddedWebServer(WindowDataService data, int port)
     {
         _data = data;
-        _asd = asd;
         _port = port;
         _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         _cts = new CancellationTokenSource();
@@ -144,13 +141,20 @@ public sealed class EmbeddedWebServer : IDisposable
             case "/index.html":
                 return Html(LandingBytes);
 
+            // Both windows are the same page; it reads its type from the path,
+            // as vatSys uses one ASDControlDX for both.
             case "/ground":
             case "/ground/":
-                return Html(GroundBytes);
-
             case "/asd":
             case "/asd/":
-                return Html(AsdBytes);
+                return Asset("display.html", "text/html; charset=utf-8");
+
+            case "/display.js":
+            case "/display-ui.js":
+                return Asset(req.Path.Substring(1), "text/javascript; charset=utf-8");
+
+            case "/display.css":
+                return Asset("display.css", "text/css; charset=utf-8");
 
             // Terminus Bold for consistent rendering on all devices (iPad etc.)
             case "/font.ttf":
@@ -161,30 +165,33 @@ public sealed class EmbeddedWebServer : IDisposable
                     : new Response(200, "font/ttf", font) { CacheSeconds = 604800 };
             }
 
-            // ---- Ground API ----
-
-            // ASMGCS positions (with name for menu display)
-            case "/api/airports":
-                return Json(200, _data.GetPositions().Select(p => new
-                {
-                    p.Name, p.Airport, p.Group, p.MapRefs,
-                    p.CenterLat, p.CenterLon, p.DefaultRange, p.Rotation, p.MagneticVariation
-                }).ToList());
-
-            // All Ground map metadata + colours (for the Maps menu)
-            case "/api/groundmaps":
-                return Json(200, new { Maps = _data.GetGroundMaps(), Colours = _data.GetColours() });
-
-            // Tracks.xml symbol geometry + the font cell sizes vatSys lays text out with
-            // (shared by both windows)
-            case "/api/symbols":
+            // What a window loads once: its positions, the maps in its Maps menu
+            // and the track symbol geometry
+            case "/api/static":
             {
-                var fonts = TrackPainter.GetFontMetrics();
+                var ground = IsGround(req);
                 return Json(200, new
                 {
+                    Positions = PositionSource.List(ground ? LogicalPositions.PositionTypes.ASMGCS : LogicalPositions.PositionTypes.ASD),
+                    Maps = MapSource.ListMaps(ground ? DisplayMaps.MapCategories.Ground : DisplayMaps.MapCategories.ASD),
                     Symbols = _data.GetTrackSymbols(),
-                    fonts.LabelFontSize, fonts.LabelFontWidth, fonts.LabelFontHeight,
-                    fonts.MapFontSize, fonts.MapFontWidth, fonts.MapFontHeight,
+                });
+            }
+
+            // What changes while vatSys runs, polled every couple of seconds: colours
+            // (brightness), fonts, display settings, the runtime maps and the tool
+            // graphics
+            case "/api/state":
+            {
+                var ground = IsGround(req);
+                return Json(200, new
+                {
+                    Colours = VatColours.All(),
+                    Fonts = FontMeasurer.Get(),
+                    Dynamic = DynamicMaps.Get(),
+                    Overlays = DisplayState.GetOverlays(ground),
+                    // Crossing/Release maps currently shown in the vatSys Ground window
+                    VisibleMaps = ground ? _data.GetVisibleCrossingReleasedMaps() : null,
                 });
             }
 
@@ -194,74 +201,27 @@ public sealed class EmbeddedWebServer : IDisposable
                 var keys = ParseMapKeys(req);
                 return keys is null
                     ? Json(400, new { Error = "maps parameter required (comma-separated Folder/Name keys)." })
-                    : Json(200, _data.GetMapLayers(keys));
+                    : Json(200, MapSource.GetLayers(keys));
             }
 
-            // Live aircraft for a Ground window: lat/lon = the client's screen centre,
-            // range = how far its view reaches (all optional)
+            // Live tracks: lat/lon = the window's screen centre, range = how far its
+            // view reaches. A Ground window also says which airport it is for.
             case "/api/aircraft":
             {
-                if (!req.Query.TryGetValue("icao", out var icao) || string.IsNullOrWhiteSpace(icao))
-                    return Json(400, new { Error = "icao required." });
-
-                if (!TryParseOptional(req, "lat", out var lat) ||
-                    !TryParseOptional(req, "lon", out var lon) ||
-                    !TryParseOptional(req, "range", out var range))
+                if (!req.Query.TryGetValue("lat", out var latText) || !TryParseNumber(latText, out var lat) ||
+                    !req.Query.TryGetValue("lon", out var lonText) || !TryParseNumber(lonText, out var lon) ||
+                    !req.Query.TryGetValue("range", out var rangeText) || !TryParseNumber(rangeText, out var range))
                 {
-                    return Json(400, new { Error = "Invalid lat/lon/range." });
+                    return Json(400, new { Error = "lat, lon and range required." });
                 }
 
-                return Json(200, _data.GetAircraft(icao, lat, lon, range));
-            }
-
-            // Crossing/Release maps currently visible in the vatSys Ground window
-            case "/api/visiblemaps":
-                return Json(200, _data.GetVisibleCrossingReleasedMaps());
-
-            // ---- ASD API ----
-
-            case "/api/asd/positions":
-                return Json(200, _asd.GetPositions().Select(p => new
+                if (IsGround(req))
                 {
-                    p.Name, p.Group, p.CenterLat, p.CenterLon, p.DefaultRange, p.MapRefs
-                }).ToList());
-
-            case "/api/asd/maps":
-                return Json(200, new
-                {
-                    Maps = _asd.GetAsdMaps(),
-                    Colours = _asd.GetColours(),
-                });
-
-            // Runtime dynamic maps in vatSys paint order: { Below, Above } the file maps
-            case "/api/asd/dynamicmaps":
-                return Json(200, _asd.GetDynamicMaps());
-
-            case "/api/asd/maplayers":
-            {
-                var keys = ParseMapKeys(req);
-                return keys is null
-                    ? Json(400, new { Error = "maps parameter required." })
-                    : Json(200, _asd.GetMapLayers(keys));
-            }
-
-            case "/api/asd/aircraft":
-            {
-                if (!req.Query.TryGetValue("lat", out var latText) ||
-                    !req.Query.TryGetValue("lon", out var lonText) ||
-                    !req.Query.TryGetValue("range", out var rangeText))
-                {
-                    return Json(400, new { Error = "lat, lon, range required." });
+                    req.Query.TryGetValue("icao", out var icao);
+                    return Json(200, TrackBuilder.Ground(icao ?? "", lat, lon, range));
                 }
 
-                if (!TryParseNumber(latText, out var lat) ||
-                    !TryParseNumber(lonText, out var lon) ||
-                    !TryParseNumber(rangeText, out var range))
-                {
-                    return Json(400, new { Error = "Invalid lat/lon/range." });
-                }
-
-                return Json(200, _asd.GetAircraft(lat, lon, range));
+                return Json(200, TrackBuilder.Asd(lat, lon, range));
             }
 
             default:
@@ -280,14 +240,17 @@ public sealed class EmbeddedWebServer : IDisposable
             .ToList();
     }
 
-    /// <summary>False only when the parameter is present but not a number.</summary>
-    private static bool TryParseOptional(HttpReq req, string name, out double? value)
+    private static bool IsGround(HttpReq req)
     {
-        value = null;
-        if (!req.Query.TryGetValue(name, out var text)) return true;
-        if (!TryParseNumber(text, out var parsed)) return false;
-        value = parsed;
-        return true;
+        return req.Query.TryGetValue("type", out var type) && string.Equals(type, "ground", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Response Asset(string name, string contentType)
+    {
+        var bytes = WebAssets.Get(name);
+        return bytes is null
+            ? new Response(404, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes("Not found."))
+            : new Response(200, contentType, bytes);
     }
 
     private static bool TryParseNumber(string text, out double value)
@@ -314,7 +277,7 @@ public sealed class EmbeddedWebServer : IDisposable
             {
                 if (File.Exists(path))
                 {
-                    _fontCache = File.ReadAllBytes(path);
+                    _fontCache = FontRepair.Fix(File.ReadAllBytes(path));
                     return _fontCache;
                 }
             }
