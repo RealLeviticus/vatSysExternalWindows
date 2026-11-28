@@ -766,6 +766,9 @@ function paintSymbol(g, type, ssr, p, headingDeg, colour, lat, lon) {
    ============================================================ */
 
 const LABEL_DIR_DEFAULT = 1, LABEL_LEN_DEFAULT = 1;
+// A track clickspot's types for the left, middle and right button
+const TRACK_CLICKS_GROUND = ['Track_Select', '', 'Label_Move', '', ''];
+const TRACK_CLICKS_ASD = ['Track_Select', 'Track_IQL', 'Label_Move', '', ''];
 // Label positions moved in this window: track id -> { dir, len }. Until a label
 // is moved here it sits where it does in vatSys.
 let labelState = {};
@@ -831,6 +834,15 @@ function paintTrackSymbols(g, ac) {
     if (s.Ident && !flashOn) continue; // an identing symbol is painted on the flash phase only
     paintSymbol(g, s.Type, s.Ssr, p, s.Hdg, s.Col ? css(s.Col) : col, ac.Lat, ac.Lon);
   }
+
+  // The track's clickspot: 12 x 12 about the position, 5 more each way on the Air window
+  if (!ac.NoClick) {
+    let half = GROUND ? 6 : 11;
+    clickspots.push({
+      kind: 'track', area: [p[0] - half + CX, p[1] - half + CY, half * 2, half * 2], ac: ac,
+      k: GROUND ? TRACK_CLICKS_GROUND : TRACK_CLICKS_ASD,
+    });
+  }
   return true;
 }
 
@@ -869,6 +881,7 @@ function paintLabel(g, ac) {
       let cw = cell.W * fw;
       let cx = (ln.J && west) ? (bx + bw - cell.X * fw - cw) : (bx + cell.X * fw);
       if (west && cx + cw > bx + bw) cx = bx + bw - cw;
+      if (cell.K) clickspots.push({ kind: 'label', area: [cx + CX, y + CY, cw, fh], ac: ac, k: cell.K });
       if (cell.Back) { g.fillStyle = css(cell.Back); g.fillRect(cx, y, cw, fh); }
       for (let run of cell.Runs) {
         let rx = cx + Math.trunc(run.Dx * fw) + run.Px, ry = y + run.Dy * fh;

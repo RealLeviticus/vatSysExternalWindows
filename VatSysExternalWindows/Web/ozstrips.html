@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>OzStrips</title>
+<link rel="stylesheet" href="/ozstrips.css">
+</head>
+<body>
+<!-- The OzStrips window: menu bar, bays in columns, control bar. Drawn by ozstrips.js -->
+<div id="app">
+  <div class="waiting">
+    <div class="waiting-box">
+      <div class="waiting-title">OzStrips</div>
+      <div class="waiting-msg">Connecting to OzStrips...</div>
+      <a class="waiting-link" href="/">Back to windows</a>
+    </div>
+  </div>
+</div>
+<!-- Menus and dialogs live outside #app so a data refresh never rebuilds a field being typed in -->
+<div id="overlay"></div>
+<div id="toast"></div>
+<script src="/ozstrips.js"></script>
+</body>
+</html>

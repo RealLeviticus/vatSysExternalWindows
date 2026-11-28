@@ -145,6 +145,7 @@ internal static class TrackBuilder
 
         if (selectable && ReferenceEquals(MMI.SelectedTrack, tl))
             dto.Syms.Add(Symbol("Selection", -1, -1));
+        dto.NoClick = !selectable;
 
         try { dto.Label = AsdLabel(tl, radarTrack, pilot, colour, isNonJurisdictionBrush); } catch { }
         return dto;
@@ -445,6 +446,31 @@ internal static class TrackBuilder
         }
 
         return dto;
+    }
+
+    // ---- Lookup ----
+
+    /// <summary>The display track a window knows by <paramref name="id"/> (the
+    /// TrackDto.Id it was sent), or null if it has gone.</summary>
+    public static Track? Find(bool ground, string id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        foreach (var tl in DisplayState.OrderedTracks())
+        {
+            try
+            {
+                if (ground)
+                {
+                    if (tl.GetRadarTrack()?.ActualAircraft?.Callsign == id) return tl;
+                }
+                else if (tl.ToString() == id)
+                {
+                    return tl;
+                }
+            }
+            catch { }
+        }
+        return null;
     }
 
     // ---- Shared ----

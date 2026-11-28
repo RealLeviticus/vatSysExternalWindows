@@ -14,6 +14,9 @@ internal sealed class AlertInfo
     public AlertPriorities Priority;
     public bool Inhibited;
     public bool Cancelled;
+    public bool CanCancel;
+    /// <summary>The vatsys.Alert itself, for acting on it (Inhibit / Cancel).</summary>
+    public object? Raw;
 }
 
 /// <summary>vatSys's parsed Labels.xml (vatsys.Labels is internal), copied into
@@ -53,6 +56,10 @@ internal sealed class LabelItemDef
     public int LeftPadding;
     public BorderFlags Border;
     public bool LeaderLineAnchor;
+    /// <summary>MMI.ClickspotTypes names for each mouse button; "" for none.</summary>
+    public string LeftClick = "", MiddleClick = "", RightClick = "";
+    /// <summary>The label line each button toggles (Label_Toggle_n clickspots).</summary>
+    public string? ToggleLeft, ToggleMiddle, ToggleRight;
 }
 
 /// <summary>
@@ -146,6 +153,12 @@ internal static class VatSysInternals
                                     LeftPadding = Get(item, "LeftPadding") is int padding ? padding : 0,
                                     Border = Get(item, "Border") is BorderFlags border ? border : BorderFlags.None,
                                     LeaderLineAnchor = Get(item, "LeaderLineAnchor") is true,
+                                    LeftClick = ClickName(item, "LeftClick"),
+                                    MiddleClick = ClickName(item, "MiddleClick"),
+                                    RightClick = ClickName(item, "RightClick"),
+                                    ToggleLeft = Get(item, "ToggleLineIdLeftClick") as string,
+                                    ToggleMiddle = Get(item, "ToggleLineIdMiddleClick") as string,
+                                    ToggleRight = Get(item, "ToggleLineIdRightClick") as string,
                                 };
                                 for (var p = 0; p < 4; p++)
                                 {
@@ -173,6 +186,13 @@ internal static class VatSysInternals
         var list = new ArrayList();
         foreach (var item in source) list.Add(item);
         return list;
+    }
+
+    /// <summary>A label item's MMI.ClickspotTypes value as its name; "" for Null.</summary>
+    private static string ClickName(object item, string field)
+    {
+        var name = Get(item, field)?.ToString() ?? "";
+        return name == "Null" ? "" : name;
     }
 
     private static Colours.Identities Identity(object item, string field)
@@ -222,11 +242,78 @@ internal static class VatSysInternals
                     Priority = Get(alert, "Priority") is AlertPriorities priority ? priority : AlertPriorities.P4,
                     Inhibited = Get(alert, "Inhibited") is true,
                     Cancelled = Get(alert, "Cancelled") is true,
+                    CanCancel = Get(alert, "CanCancel") is true,
+                    Raw = alert,
                 });
             }
         }
         catch { }
         return result;
+    }
+
+    // ---- Reflection for actions ----
+
+    /// <summary>A non-public vatSys type by its full name.</summary>
+    public static Type? VatSysType(string fullName) => VatSys.GetType(fullName);
+
+    /// <summary>Reads a field or property (any visibility); null when it is not there.</summary>
+    public static object? Member(object? target, string name)
+    {
+        if (target is null) return null;
+        try { return Get(target, name); } catch { return null; }
+    }
+
+    /// <summary>Reads a static field or property (any visibility).</summary>
+    public static object? StaticMember(Type? type, string name)
+    {
+        if (type is null) return null;
+        try
+        {
+            var field = type.GetField(name, Any);
+            if (field is not null) return field.GetValue(null);
+            return type.GetProperty(name, Any)?.GetValue(null);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Invokes the method called <paramref name="name"/> whose parameters
+    /// take <paramref name="args"/> (trailing optional parameters are filled with
+    /// their defaults). Throws when there is no such method, so a caller never
+    /// reports an action as done that was not.</summary>
+    public static object? Invoke(Type type, object? target, string name, params object?[] args)
+    {
+        foreach (var method in type.GetMethods(Any))
+        {
+            if (method.Name != name) continue;
+            var parameters = method.GetParameters();
+            if (parameters.Length < args.Length) continue;
+
+            var call = new object?[parameters.Length];
+            var match = true;
+            for (var i = 0; i < parameters.Length && match; i++)
+            {
+                if (i < args.Length)
+                {
+                    var arg = args[i];
+                    var wanted = parameters[i].ParameterType;
+                    if (arg is null ? wanted.IsValueType && Nullable.GetUnderlyingType(wanted) is null : !wanted.IsInstanceOfType(arg)) match = false;
+                    call[i] = arg;
+                }
+                else if (parameters[i].IsOptional)
+                {
+                    call[i] = parameters[i].DefaultValue;
+                }
+                else
+                {
+                    match = false;
+                }
+            }
+            if (!match) continue;
+
+            try { return method.Invoke(method.IsStatic ? null : target, call); }
+            catch (TargetInvocationException ex) when (ex.InnerException is not null) { throw ex.InnerException; }
+        }
+        throw new MissingMethodException(type.FullName, name);
     }
 
     // ---- Plugin hooks ----

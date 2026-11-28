@@ -17,6 +17,10 @@ namespace VatSysExternalWindows;
 public sealed class EmbeddedWebServer : IDisposable
 {
     private const int MaxHeaderBytes = 32768;
+    // The only request bodies are small JSON commands
+    private const int MaxBodyBytes = 65536;
+    // An action runs on vatSys's GUI thread; the page is told when that is busy
+    private const int ActionWaitMs = 3000;
     // A request must arrive in full within this window, however slowly the
     // client trickles it — a stalled connection must not hold a worker.
     private const int RequestTimeoutMs = 10000;
@@ -132,6 +136,7 @@ public sealed class EmbeddedWebServer : IDisposable
 
     private Response Route(HttpReq req)
     {
+        if (req.Method == "POST") return RoutePost(req);
         if (req.Method != "GET" && req.Method != "HEAD")
             return Json(405, new { Error = "Method not allowed." });
 
@@ -151,10 +156,21 @@ public sealed class EmbeddedWebServer : IDisposable
 
             case "/display.js":
             case "/display-ui.js":
+            case "/display-popups.js":
+            case "/ozstrips.js":
                 return Asset(req.Path.Substring(1), "text/javascript; charset=utf-8");
 
             case "/display.css":
-                return Asset("display.css", "text/css; charset=utf-8");
+            case "/ozstrips.css":
+                return Asset(req.Path.Substring(1), "text/css; charset=utf-8");
+
+            // The OzStrips strip board (when the OzStrips plugin is loaded)
+            case "/ozstrips":
+            case "/ozstrips/":
+                return Asset("ozstrips.html", "text/html; charset=utf-8");
+
+            case "/api/ozstrips/state":
+                return Json(200, OzStripsBridge.GetState());
 
             // Terminus Bold for consistent rendering on all devices (iPad etc.)
             case "/font.ttf":
@@ -227,6 +243,76 @@ public sealed class EmbeddedWebServer : IDisposable
             default:
                 return Json(404, new { Error = "Not found." });
         }
+    }
+
+    /// <summary>The requests that change something in vatSys. They are accepted
+    /// only as JSON posted by the plugin's own pages: a form on another website
+    /// cannot send that content type, and a script there is refused by the origin
+    /// check (and gets no CORS approval for the preflight).</summary>
+    private Response RoutePost(HttpReq req)
+    {
+        if (req.Path != "/api/action" && req.Path != "/api/ozstrips/command")
+            return Json(405, new { Error = "Method not allowed." });
+
+        if (!req.Header("Content-Type").StartsWith("application/json", StringComparison.OrdinalIgnoreCase) || !SameOrigin(req))
+            return Json(403, new { Error = "Forbidden." });
+
+        Dictionary<string, object?> body;
+        try
+        {
+            if (_json.DeserializeObject(Encoding.UTF8.GetString(req.Body)) is not Dictionary<string, object?> parsed)
+                return Json(400, new { Error = "A JSON object is required." });
+            body = new Dictionary<string, object?>(parsed, StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return Json(400, new { Error = "Invalid JSON." });
+        }
+
+        string Text(string key) => body.TryGetValue(key, out var value) && value != null ? Convert.ToString(value, CultureInfo.InvariantCulture) ?? "" : "";
+        int? Number(string key) => int.TryParse(Text(key), NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) ? number : null;
+
+        if (req.Path == "/api/ozstrips/command")
+        {
+            var action = Text("Action");
+            if (action.Length == 0) return Json(400, new { Error = "Action required." });
+            string? Optional(string key) => body.TryGetValue(key, out var value) && value != null ? Text(key) : null;
+            return Json(200, OzStripsBridge.Execute(action, Optional("Callsign"), Optional("Bay"), Optional("Value"), Number("Style")));
+        }
+
+        var request = new ActionRequest
+        {
+            Ground = string.Equals(Text("Type"), "ground", StringComparison.OrdinalIgnoreCase),
+            Id = Text("Id"),
+            Action = Text("Action"),
+            Arg = Text("Arg"),
+            Arg2 = Text("Arg2"),
+            Ctx = Text("Ctx"),
+            Button = Number("Button") ?? 0,
+        };
+        if (body.TryGetValue("Toggles", out var toggles) && toggles is System.Collections.IEnumerable names && toggles is not string)
+        {
+            foreach (var name in names)
+            {
+                if (name != null) request.Toggles.Add(Convert.ToString(name, CultureInfo.InvariantCulture) ?? "");
+            }
+        }
+        if (request.Action.Length == 0) return Json(400, new { Error = "Action required." });
+
+        var busy = new ActionResult { Ok = false, Error = "vatSys is busy; try again." };
+        return Json(200, GuiThread.Call(() => TrackActions.Execute(request), ActionWaitMs, busy));
+    }
+
+    /// <summary>A browser names the page a POST comes from in Origin; it must be
+    /// the address this server was reached at. Requests without one (not from a
+    /// browser page) are let through.</summary>
+    private static bool SameOrigin(HttpReq req)
+    {
+        var origin = req.Header("Origin");
+        if (origin.Length == 0) return true;
+        var host = req.Header("Host");
+        return host.Length > 0 && Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
+               string.Equals(uri.Authority, host, StringComparison.OrdinalIgnoreCase);
     }
 
     private static List<string>? ParseMapKeys(HttpReq req)
@@ -303,7 +389,7 @@ public sealed class EmbeddedWebServer : IDisposable
     {
         var status = r.Code switch
         {
-            200 => "OK", 400 => "Bad Request", 404 => "Not Found",
+            200 => "OK", 400 => "Bad Request", 403 => "Forbidden", 404 => "Not Found",
             405 => "Method Not Allowed", 500 => "Internal Server Error", _ => "OK",
         };
 
@@ -313,7 +399,7 @@ public sealed class EmbeddedWebServer : IDisposable
             "Content-Length: " + r.Body.Length + "\r\n" +
             "Connection: close\r\n" +
             "X-Content-Type-Options: nosniff\r\n" +
-            (r.Code == 405 ? "Allow: GET, HEAD\r\n" : "") +
+            (r.Code == 405 ? "Allow: GET, HEAD, POST\r\n" : "") +
             (r.CacheSeconds > 0 ? "Cache-Control: public, max-age=" + r.CacheSeconds : "Cache-Control: no-store") +
             "\r\n\r\n";
 
@@ -322,9 +408,9 @@ public sealed class EmbeddedWebServer : IDisposable
         if (!headOnly && r.Body.Length > 0) s.Write(r.Body, 0, r.Body.Length);
     }
 
-    /// <summary>Reads the request line and headers (any body is ignored — the API
-    /// is GET-only). Returns null if the client disconnects, sends an oversized
-    /// or malformed header, or doesn't finish within the request timeout.</summary>
+    /// <summary>Reads the request line, the headers and, for a POST, the body.
+    /// Returns null if the client disconnects, sends an oversized or malformed
+    /// request, or doesn't finish within the request timeout.</summary>
     private static HttpReq? ReadRequest(TcpClient client, NetworkStream stream)
     {
         var buf = new byte[4096];
@@ -370,11 +456,47 @@ public sealed class EmbeddedWebServer : IDisposable
             }
         }
 
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 1; i < lines.Length; i++)
+        {
+            var colon = lines[i].IndexOf(':');
+            if (colon > 0) headers[lines[i].Substring(0, colon).Trim()] = lines[i].Substring(colon + 1).Trim();
+        }
+
+        var method = requestLine[0].Trim().ToUpperInvariant();
+        var body = Array.Empty<byte>();
+        if (method == "POST")
+        {
+            if (!headers.TryGetValue("Content-Length", out var lengthText) ||
+                !int.TryParse(lengthText, NumberStyles.None, CultureInfo.InvariantCulture, out var length) ||
+                length < 0 || length > MaxBodyBytes)
+            {
+                return null;
+            }
+
+            // Part of the body may have arrived with the headers
+            body = new byte[length];
+            var bodyStart = end + HeaderEnd.Length;
+            var have = Math.Min(length, len - bodyStart);
+            Array.Copy(buf, bodyStart, body, 0, have);
+            while (have < length)
+            {
+                var remaining = RequestTimeoutMs - (int)clock.ElapsedMilliseconds;
+                if (remaining <= 0) return null;
+                client.ReceiveTimeout = remaining;
+                var read = stream.Read(body, have, length - have);
+                if (read <= 0) return null;
+                have += read;
+            }
+        }
+
         return new HttpReq
         {
-            Method = requestLine[0].Trim().ToUpperInvariant(),
+            Method = method,
             Path = qi < 0 ? rawPath : rawPath.Substring(0, qi),
             Query = query,
+            Headers = headers,
+            Body = body,
         };
     }
 
@@ -397,6 +519,10 @@ public sealed class EmbeddedWebServer : IDisposable
         public string Method { get; set; } = "";
         public string Path { get; set; } = "";
         public Dictionary<string, string> Query { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> Headers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public byte[] Body { get; set; } = Array.Empty<byte>();
+
+        public string Header(string name) => Headers.TryGetValue(name, out var value) ? value : "";
     }
 
     private sealed class Response
