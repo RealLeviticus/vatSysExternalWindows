@@ -1,0 +1,202 @@
+/* OzStrips over a web page: the OzStrips window's own colours and sizes */
+
+/* Terminus Bold, served by the plugin so an iPad draws the same glyphs */
+@font-face {
+  font-family: 'Terminus';
+  src: url('/font.ttf') format('truetype'), local('Terminus (TTF)'), local('TerminusTTF-Bold'), local('Terminus (TTF) Bold');
+  font-weight: bold;
+}
+
+:root{
+  --main-gray:#a0aaaa;
+  --menu-text:#000060;
+  --app-gray:#808080;
+  --bay-gray:#404040;
+  --btn-gray:#8c9696;
+  --strip-scale:1;
+  --menu-h:25px;
+  --ui-font:"Terminus","Terminus (TTF)",Consolas,"Lucida Console",monospace;
+  --strip-font:"Segoe UI",-apple-system,"Helvetica Neue",Arial,sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:var(--app-gray);font-family:var(--ui-font);color:#000;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;-webkit-text-size-adjust:100%;touch-action:manipulation}
+button,input,select{font:inherit}
+#app{height:100vh;height:100dvh;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+
+/* Shown until OzStrips answers, and whenever it is closed or unreachable */
+.waiting{display:flex;align-items:center;justify-content:center;height:100%;padding:16px;color:#111;background:#8b8b8b}
+.waiting-box{display:flex;flex-direction:column;align-items:center;gap:14px;max-width:420px;text-align:center}
+.waiting-title{font-size:22px;font-weight:700;color:var(--menu-text)}
+.waiting-msg{font-size:16px;font-weight:700}
+.waiting-link{display:flex;align-items:center;justify-content:center;min-width:200px;height:48px;padding:0 16px;background:var(--btn-gray);border:1px solid #5b6363;color:var(--menu-text);font-size:16px;font-weight:700;text-decoration:none}
+.waiting-link:active{filter:brightness(.92)}
+
+.top-menu{height:var(--menu-h);min-height:var(--menu-h);display:flex;align-items:stretch;gap:8px;padding:0 4px;background:var(--main-gray);border-bottom:1px solid #6e7676;color:var(--menu-text);font-size:16px;font-weight:700;white-space:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.top-menu > *{display:flex;align-items:center}
+.top-menu .label{opacity:.95;padding:0 6px}
+.top-menu .menu-item{cursor:pointer;color:inherit;text-decoration:none}
+.top-menu .menu-item:active{filter:brightness(.92)}
+.top-menu .menu-item.open{background:#c4cccc;border:1px solid #6e7676;border-bottom:none;border-radius:2px 2px 0 0}
+.top-menu .pending{padding:0 6px;border-radius:2px}
+.top-menu .pending.active{background:lightblue}
+.top-menu .autofill{padding:0 6px;border-radius:2px}
+.top-menu .autofill.on{background:lightgreen}
+.top-menu .autofill.off{background:red;color:var(--menu-text)}
+
+.menu-layer{position:fixed;top:calc(var(--menu-h) + env(safe-area-inset-top));right:0;bottom:0;left:0;z-index:90}
+.menu-backdrop{position:absolute;top:0;right:0;bottom:0;left:0}
+.menu-panel{position:absolute;top:0;min-width:220px;max-width:calc(100vw - 4px);max-height:calc(100% - 4px);overflow-y:auto;-webkit-overflow-scrolling:touch;background:#d5dede;border:1px solid #606868;box-shadow:2px 2px 0 #2f3434;padding:2px}
+.menu-row{height:28px;border:1px solid transparent;background:#d5dede;color:#000060;font-size:13px;font-weight:700;text-align:left;padding:0 8px;cursor:pointer;display:flex;align-items:center;gap:6px;width:100%}
+.menu-row:hover,.menu-row:active{background:#bfcaca}
+.menu-row:disabled{opacity:.45;cursor:default}
+.menu-sep{height:1px;background:#7f8787;margin:2px 0}
+.menu-check{display:inline-block;width:14px}
+
+.main{flex:1;overflow:auto;padding:0;background:var(--main-gray);-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y}
+.columns{display:flex;gap:0;min-height:100%}
+/* A bay is 481px wide for a 424px strip; a larger strip scale widens the column with it */
+.column{min-width:min(calc(424px * var(--strip-scale) + 57px),100vw);flex:1 0 min(calc(424px * var(--strip-scale) + 57px),100vw);display:flex;flex-direction:column;gap:0;padding:2px}
+.bay{background:var(--bay-gray);display:flex;flex-direction:column;min-height:90px;flex:1 1 0}
+.bay-top{height:36px;min-height:36px;background:#000;display:flex;align-items:center;padding:0 6px;gap:6px}
+.bay-name{width:150px;min-width:150px;align-self:stretch;display:flex;align-items:center;color:#fff;font-family:var(--strip-font);font-weight:900;font-size:16px;line-height:1;text-align:left;cursor:pointer}
+.bay-spacer{flex:1 1 auto}
+.bay-btn{height:24px;padding:0 6px;border:1px solid #5b6363;background:#8c9696;color:#000060;font-family:var(--ui-font);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+.bay-btn.queue{width:116px}
+.bay-btn.div{width:145px}
+.bay-btn:active{filter:brightness(.94)}
+/* The CDM bay's header: one cell per period, coloured by departures against the target rate */
+.cdm-stats{display:flex;flex:0 1 300px;align-self:stretch;margin:1px 0;min-width:0}
+.cdm-cell{flex:1 1 0;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap;color:#fff;font-family:var(--strip-font);font-size:15px;font-weight:700}
+/* Touch scrolling is done in script (ozstrips.js) so a refresh cannot cut a swipe short */
+.bay-body{flex:1;overflow-y:auto;overflow-x:hidden;padding:0;background:#404040;-webkit-overflow-scrolling:touch;touch-action:none}
+.bay-empty{padding:10px 4px;color:#bbb;font-size:12px;text-align:center}
+
+.strip-shell{position:relative;width:calc(424px * var(--strip-scale));height:calc(64px * var(--strip-scale));margin:0;cursor:default}
+.strip-shell.dep{background:#c1e6f2}
+.strip-shell.arr{background:#ffffa0}
+.strip-shell.loc{background:#e6aedd}
+.strip-shell.unk{background:#404040}
+.strip-shell.cock1{margin-left:calc(30px * var(--strip-scale))}
+.strip-canvas{position:absolute;left:0;top:0;width:424px;height:64px;transform:scale(var(--strip-scale));transform-origin:top left}
+.strip-grid{position:absolute;left:2px;top:2px;width:420px;height:60px;border:1px solid #000;display:grid;grid-template-columns:50px 25px 25px 25px 25px 25px 75px 30px 50px 60px 30px;grid-template-rows:20px 20px 20px;font-family:var(--strip-font);font-size:12px;font-weight:700}
+.cell{border:1px solid #000;display:flex;align-items:center;justify-content:center;padding:0 2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1}
+.cell.tap{cursor:pointer}
+
+.c-stand{grid-column:1;grid-row:1}
+.c-eobt{grid-column:2/4;grid-row:1}
+.c-type{grid-column:4/6;grid-row:1}
+.c-wtc{grid-column:6;grid-row:1}
+.c-acid{grid-column:7;grid-row:1/3;font-size:14px}
+.c-rwy{grid-column:8;grid-row:1}
+.c-clx{grid-column:9;grid-row:1/3}
+.c-sid{grid-column:10;grid-row:1;background:limegreen}
+.c-rfl{grid-column:11;grid-row:1;color:gray}
+.c-ades{grid-column:1;grid-row:2}
+.c-route{grid-column:2;grid-row:2}
+.c-frul{grid-column:3;grid-row:2}
+.c-pdc{grid-column:4;grid-row:2}
+.c-ssr{grid-column:5/7;grid-row:2}
+.c-ready{grid-column:8;grid-row:2}
+.c-fwpt{grid-column:10;grid-row:2}
+.c-cfl{grid-column:11;grid-row:2}
+.c-glop{grid-column:1/7;grid-row:3}
+.c-remark{grid-column:7/9;grid-row:3}
+.c-freq{grid-column:9/11;grid-row:3}
+.c-tot{grid-column:11;grid-row:3;font-size:10px}
+
+.strip-shell.cock1 .cock-zone{background:cyan}
+.strip-shell.crossing .cross-zone{background:red}
+.cell.bg-lightgray{background:lightgray}
+.cell.bg-yellow{background:yellow}
+.cell.bg-orange{background:orange}
+.cell.bg-lime{background:lime}
+.cell.bg-limegreen{background:limegreen}
+.cell.bg-pink{background:pink}
+.cell.bg-silver{background:silver}
+.cell.bg-world{background:yellow}
+.cell.pdc-blink{animation:pdcBlink 2s steps(1,end) infinite}
+.cell.sid-transition{box-shadow:inset 0 0 0 2px yellow}
+.cell.tot-running{color:green}
+@keyframes pdcBlink{0%,49%{background:#fff}50%,100%{background:yellow}}
+
+/* An aircraft planned to an invalid destination: OzStrips strikes the strip through */
+.noslot{position:absolute;left:2px;top:2px;width:420px;height:60px;pointer-events:none;display:flex;align-items:center;justify-content:center;font-family:var(--strip-font);font-size:30px;font-weight:700;line-height:1;color:rgba(255,0,0,.376);background:linear-gradient(to top right,transparent calc(50% - 1px),rgba(255,0,0,.5) calc(50% - .5px),rgba(255,0,0,.5) calc(50% + .5px),transparent calc(50% + 1px))}
+
+.bar-shell{position:relative;width:calc(424px * var(--strip-scale));height:calc(30px * var(--strip-scale));margin:0}
+.bar-item{position:absolute;left:0;top:0;width:424px;height:30px;transform:scale(var(--strip-scale));transform-origin:top left;border:1px solid #000;background:gray;color:#000;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap;font-family:var(--strip-font);font-size:18px;font-weight:700;line-height:1;cursor:pointer}
+.bar-item.style1{background:lightgray}
+.bar-item.style2{background:orange}
+.bar-item.style3{background:red;color:#fff}
+.bar-item.picked{background:darkgray}
+
+.control-bar{height:45px;min-height:45px;display:flex;align-items:center;gap:4px;padding:3px;background:var(--main-gray);border-top:1px solid #6e7676;overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* CONN STAT: the core is the connection, the rim turns blue when others share the aerodrome */
+.conn-stat{position:relative;flex:0 0 96px;height:37px;display:flex;align-items:center;justify-content:center;color:#000;font-size:16px;font-weight:700;cursor:pointer;--core:#ff4500;--outer:#ff4500}
+.conn-stat.connected{--core:#008000;--outer:#008000}
+.conn-stat.reconnecting{--core:#ffa500;--outer:#ffa500}
+.conn-stat.multi{--outer:#0000ff}
+.conn-stat::before,.conn-stat::after{content:"";position:absolute;top:0;right:0;bottom:0;left:0}
+.conn-stat::before{background:var(--outer)}
+.conn-stat::after{top:5px;right:5px;bottom:5px;left:5px;background:var(--core)}
+.conn-stat span{position:relative;z-index:1}
+.time-box{flex:0 0 137px;height:37px;background:#ffffe1;border:1px solid #555;color:#000060;display:flex;align-items:center;justify-content:center;font-size:27px;font-weight:700}
+.ad-wrap{flex:0 0 96px;height:37px;padding:1px;background:darkgray;cursor:pointer}
+.ad-box{height:100%;background:silver;color:#000060;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700}
+.atis-wrap{flex:0 0 42px;height:37px;padding:1px;background:darkgray}
+.atis-box{height:100%;background:silver;color:#000060;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700}
+.ctl-btn{flex:0 0 auto;height:37px;padding:0 10px;border:1px solid #6b7474;background:var(--btn-gray);color:#000060;font-size:15px;font-weight:700;cursor:pointer;white-space:nowrap}
+.ctl-btn.w96{width:96px}
+.ctl-btn.w142{width:142px}
+.ctl-btn.cross{background:rosybrown}
+.ctl-btn.release{background:dodgerblue;color:#fff}
+.ctl-btn:active{filter:brightness(.94)}
+.ctl-btn:disabled{opacity:.45;cursor:default}
+
+.modal-overlay{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;z-index:100;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.modal{width:min(94vw,420px);max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch;background:#d4d4d4;border:2px solid #000;padding:10px}
+.modal h4{margin:0 0 8px;font-family:var(--strip-font);font-size:16px}
+.modal .row{display:flex;flex-direction:column;gap:4px;margin-bottom:8px;font-size:13px}
+.modal input,.modal select{height:34px;padding:0 8px;border:1px solid #333;border-radius:0;background:#fff;color:#000;font-size:16px;-webkit-user-select:text;user-select:text}
+.modal input{text-transform:uppercase}
+.modal .btns{display:flex;gap:6px}
+.modal button{flex:1;height:34px;border:1px solid #333;cursor:pointer;background:#b7c1c1;color:#000;font-size:14px;font-weight:700}
+.modal button:active{filter:brightness(.92)}
+.modal button.ok{background:#7ebf7e}
+.modal button.cancel{background:#c7a7a7}
+.modal .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.modal .gap{margin-bottom:8px}
+.modal .gap-top{margin-top:8px}
+
+#toast{position:fixed;left:0;right:0;bottom:calc(58px + env(safe-area-inset-bottom));display:flex;justify-content:center;pointer-events:none;z-index:120}
+.toast{max-width:92vw;padding:6px 10px;background:rgba(0,0,0,.82);color:#fff;font-size:13px;border-radius:4px;white-space:pre-wrap;text-align:center;pointer-events:auto}
+
+@media(max-width:840px){
+  :root{--menu-h:36px}
+  .top-menu{font-size:14px;gap:4px}
+  .control-bar{height:auto;min-height:45px;flex-wrap:wrap}
+  .strip-shell{width:calc(min(424px,100vw - 8px) * var(--strip-scale));overflow:hidden}
+  .bar-shell{width:calc(min(424px,100vw - 8px) * var(--strip-scale))}
+  .modal{width:min(96vw,420px)}
+}
+@media(max-width:600px){
+  .bay-btn{font-size:11px;padding:0 3px}
+  .bay-btn.queue{width:auto}
+  .bay-btn.div{width:auto}
+  .bay-name{min-width:100px;width:100px;font-size:13px}
+}
+
+/* A finger needs more room than a mouse pointer: taller menus, buttons and dialog controls */
+@media(pointer:coarse){
+  :root{--menu-h:40px}
+  .top-menu .label,.top-menu .pending,.top-menu .autofill{padding:0 10px}
+  .menu-row{height:44px;font-size:15px}
+  .menu-panel{min-width:260px}
+  .bay-top{height:44px;min-height:44px}
+  .bay-btn{height:36px}
+  .control-bar{height:auto;min-height:52px}
+  .conn-stat,.time-box,.ad-wrap,.atis-wrap,.ctl-btn{height:44px}
+  .modal-overlay{align-items:flex-start;padding-top:calc(6vh + env(safe-area-inset-top))}
+  .modal input,.modal select,.modal button{height:44px}
+  .modal .grid{gap:8px}
+  .toast{font-size:15px;padding:10px 14px}
+}

@@ -7,6 +7,7 @@
   --win-interactive: rgb(0,0,96);    /* InteractiveText */
   --win-depressed: rgb(130,146,146); /* WindowButtonDepressed */
   --win-selected: rgb(0,0,96);       /* WindowButtonSelected */
+  --win-noninteractive: rgb(90,90,90); /* NonInteractiveText */
   --view-bg: rgb(127,127,127);
   /* ControlPaint.DrawBorder3D uses the Windows system colours, not the profile's */
   --sys-light: rgb(227,227,227);     /* COLOR_3DLIGHT */
@@ -144,3 +145,116 @@ body {
 #view { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--view-bg); }
 #cv { position: absolute; left: 0; top: 0; display: block; touch-action: none; cursor: crosshair; }
 #view.interactive #cv { cursor: cell; }
+
+/* ---- Menus and popups opened from a track or a label item ---- */
+
+input { -webkit-user-select: text; user-select: text; }
+
+.popup-backdrop { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 90; }
+.popup { position: fixed; z-index: 100; }
+/* Opened by a finger: half as large again */
+.popup.touch { transform: scale(1.5); transform-origin: 0 0; }
+
+.menu-drop.context { max-height: 100vh; }
+.menu-drop.context.touch { max-height: 66vh; }
+
+/* A small BaseForm: 2px border, title strip with the close button */
+.popup.window { background: var(--win-border); padding: 2px; }
+.pw-title {
+  position: relative; height: 24px; background: var(--win-bg);
+  border-bottom: 1px solid var(--win-border);
+}
+.pw-title::after { content: ''; position: absolute; left: 0; right: 0; top: 22px; height: 1px; background: #000; }
+.pw-title-text {
+  position: absolute; left: 0; right: 23px; top: 0; height: 23px; line-height: 23px; padding: 0 3px;
+  text-align: center; white-space: nowrap; overflow: hidden; color: var(--win-text);
+}
+.pw-close { right: -1px; }
+.pw-body { background: var(--win-bg); }
+
+/* GenericButton: raised, sunken on WindowButtonDepressed while pressed.
+   ToggleButton: stays sunken while checked. */
+.pw-button {
+  width: 100px; height: 28px; line-height: 28px; text-align: center; font-size: 18px; cursor: default;
+  white-space: nowrap; overflow: hidden;
+  color: var(--win-interactive); background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-light), inset -1px -1px 0 var(--sys-dkshadow),
+              inset 2px 2px 0 var(--sys-hilight), inset -2px -2px 0 var(--sys-shadow);
+}
+.pw-button:active, .pw-button.checked {
+  background: var(--win-depressed);
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+.pw-button.dim, .pw-button.off { color: var(--win-noninteractive); }
+.pw-button.off:active {
+  background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-light), inset -1px -1px 0 var(--sys-dkshadow),
+              inset 2px 2px 0 var(--sys-hilight), inset -2px -2px 0 var(--sys-shadow);
+}
+
+/* CFLMenu / LevelMenu / DiversionMenu / TimeMenu: a 71 x 229 list of 25px rows in
+   an inset panel, the scroll bar beside it, the buttons beneath */
+.window.list .pw-body { width: 101px; }
+.pw-list-row { position: relative; height: 241px; }
+.pw-inset {
+  position: absolute; left: 1px; top: 1px; width: 78px; height: 239px;
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+.pw-list {
+  position: absolute; left: 3px; top: 6px; width: 71px; height: 229px;
+  overflow-y: auto; overflow-x: hidden; touch-action: pan-y; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.pw-list::-webkit-scrollbar { display: none; }
+.pw-item {
+  height: 25px; line-height: 25px; text-align: center; font-size: 21px; cursor: default;
+  color: var(--win-interactive); background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-light), inset -1px -1px 0 var(--sys-dkshadow),
+              inset 2px 2px 0 var(--sys-hilight), inset -2px -2px 0 var(--sys-shadow);
+}
+.pw-item.selected {
+  color: var(--win-bg); background: var(--win-selected);
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+.pw-scroll { position: absolute; left: 80px; top: 1px; width: 20px; height: 239px; background: var(--win-selected); touch-action: none; }
+.pw-thumb { position: absolute; left: 2px; width: 16px; min-height: 7px; background: var(--win-bg); }
+.pw-entry {
+  display: block; width: 100px; height: 25px; padding: 0 2px; border: 0; outline: 0; border-radius: 0;
+  font: bold 18px 'Terminus', 'Consolas', 'Courier New', monospace; text-align: center;
+  color: var(--win-interactive); background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+
+/* HandoffWindow: 60 x 23 buttons flowing six to a row */
+.window.handoff .pw-body { padding: 3px 2px; }
+.pw-flow { display: flex; flex-wrap: wrap; align-content: flex-start; width: max-content; min-width: 266px; max-width: 360px; min-height: 130px; }
+.window.handoff .pw-button { width: 60px; height: 23px; line-height: 23px; }
+.window.handoff .pw-button.wide { width: 120px; }
+
+.window.confirm .pw-body { padding: 10px; min-width: 260px; max-width: 360px; }
+.pw-text { color: var(--win-text); margin-bottom: 10px; white-space: normal; text-align: center; }
+.pw-buttons { display: flex; justify-content: center; gap: 10px; }
+
+/* The label data field, over the label item */
+.pw-field {
+  height: 20px; padding: 0 1px; border: 0; outline: 0; border-radius: 0;
+  font: bold 16px 'Terminus', 'Consolas', 'Courier New', monospace; text-transform: uppercase;
+  color: var(--win-interactive); background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-shadow), inset -1px -1px 0 var(--sys-hilight),
+              inset 2px 2px 0 var(--sys-dkshadow), inset -2px -2px 0 var(--sys-light);
+}
+
+/* What an action did that this window does not show (a vatSys window opened), or why it failed */
+#toast {
+  display: none; position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 5;
+  max-width: 94%; height: 24px; line-height: 24px; padding: 0 10px; pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--win-interactive); background: var(--win-bg);
+  box-shadow: inset 1px 1px 0 var(--sys-light), inset -1px -1px 0 var(--sys-dkshadow);
+}
+#toast.show { display: block; }
+#toast.error { color: var(--win-text); }

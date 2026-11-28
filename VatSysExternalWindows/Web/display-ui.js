@@ -56,6 +56,7 @@ function applyTheme() {
   set('--win-interactive', 'InteractiveText');
   set('--win-depressed', 'WindowButtonDepressed');
   set('--win-selected', 'WindowButtonSelected');
+  set('--win-noninteractive', 'NonInteractiveText');
   // A secondary ASD window's border takes the focus colour while it has focus
   set('--win-border', !GROUND && focused ? 'PopupASDWindowBorderFocused' : 'WindowBorder');
   root.setProperty('--view-bg', backgroundColour());
@@ -265,10 +266,13 @@ function selectPosition(pos) {
 }
 
 /* ============================================================
-   Pointer handling. Mouse buttons behave as in vatSys: right-click moves a
-   label or draws a zoom box, middle-drag is the quick look-around pan.
-   Touch has no vatSys counterpart: drag pans, pinch zooms, a tap picks up
-   and puts down a label, double-tap returns to the position's default view.
+   Pointer handling. Mouse buttons behave as in vatSys: each button does what
+   the clickspot under it says (select a track, open a label item's menu,
+   toggle, move the label), right-click elsewhere draws a zoom box, middle-drag
+   is the quick look-around pan.
+   Touch has no vatSys counterpart: a tap is a left click, holding a finger on
+   a track or label item offers what the middle and right buttons do there,
+   drag pans, pinch zooms, double-tap returns to the position's default view.
    ============================================================ */
 
 function clientPoint(e) { let r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
@@ -287,6 +291,82 @@ function trackAt(x, y, touch) {
 function spotAt(x, y, kind) {
   for (let i = clickspots.length - 1; i >= 0; i--) if (clickspots[i].kind === kind && inArea(clickspots[i].area, x, y)) return clickspots[i];
   return null;
+}
+
+/* ---------- Track and label clickspots: the loop in ASD_MouseDown ---------- */
+
+// Click types vatSys has no handler for: the click carries on to whatever is beneath
+const NO_ACTION = { '': 1, Label_Field18_Popup: 1, Label_PRW_Popup: 1 };
+
+// The clickspots a button acts on at a point, in the order vatSys walks them
+// (the order they were painted). A finger that misses them all takes the
+// nearest one within reach.
+function spotsUnder(x, y, button, touch) {
+  let exact = [], near = null, nearDist = Infinity;
+  for (let s of clickspots) {
+    if (s.kind !== 'track' && s.kind !== 'label') continue;
+    if (button >= 0 && NO_ACTION[s.k[button]]) continue;
+    if (button < 0 && NO_ACTION[s.k[1]] && NO_ACTION[s.k[2]]) continue;
+    let a = s.area;
+    if (inArea(a, x, y)) { exact.push(s); continue; }
+    if (!touch) continue;
+    let reach = s.kind === 'track' ? 14 : 7;
+    if (x < a[0] - reach || x > a[0] + a[2] + reach || y < a[1] - reach || y > a[1] + a[3] + reach) continue;
+    let d = Math.hypot(Math.max(a[0] - x, 0, x - a[0] - a[2]), Math.max(a[1] - y, 0, y - a[1] - a[3]));
+    if (d < nearDist) { nearDist = d; near = s; }
+  }
+  return exact.length > 0 ? exact : (near ? [near] : []);
+}
+
+// What a button does on one clickspot. False when it does nothing there, so
+// the click carries on.
+function clickSpot(spot, button, x, y, touch) {
+  let type = spot.k[button], ac = spot.ac;
+  // While something is being placed, vatSys only lets a click select a track
+  if (type !== 'Track_Select' && movingSomething()) return false;
+  if (type === 'Label_Move') return beginLabelMove(ac);
+
+  let r = cv.getBoundingClientRect(), a = spot.area;
+  let ctx = { id: ac.Id, x: r.left + x, y: r.top + y, touch: !!touch, cell: [r.left + a[0], r.top + a[1], a[2], a[3]] };
+  sendAction(ctx, { Action: 'click', Arg: type, Button: button, Arg2: spot.k[3] || '', Ctx: spot.k[4] || '' });
+  return true;
+}
+
+function dispatchClick(x, y, button, touch) {
+  for (let spot of spotsUnder(x, y, button, touch)) if (clickSpot(spot, button, x, y, touch)) return true;
+  return false;
+}
+
+// Holding a finger on a track or label item: what the middle and right mouse
+// buttons do there, as a menu
+const TOUCH_NAMES = {
+  Track_IQL: 'Quick Look', Label_Move: 'Move Label', Label_CPrompt: 'C Prompt',
+  Label_Emerg: 'Acknowledge Alert', Label_Warning: 'Acknowledge Alert',
+  Label_Extend_Toggle: 'Extended Label', Label_NewCFL_Toggle: 'CFL Highlight',
+  Label_CPDLC_Message_Toggle: 'CPDLC Message', Label_CPDLC_Editor: 'CPDLC Editor', Label_CPDLC_Menu: 'CPDLC Menu',
+  Label_SAR_Popup: 'SAR Time', Label_Toggle_1: 'More Lines', Label_Toggle_2: 'More Lines', Label_Toggle_3: 'More Lines',
+  Label_ACID_Menu: 'Aircraft Menu', Label_Runway: 'Runway', Label_CFL_Popup: 'Cleared Level',
+  Label_PRL_Popup: 'Reported Level', Label_WX_L_Popup: 'Deviation Left', Label_WX_R_Popup: 'Deviation Right',
+  Label_OpData_Popup: 'Label Data',
+};
+function openTouchChooser(x, y) {
+  let items = [], seen = {}, title = '';
+  for (let spot of spotsUnder(x, y, -1, true)) {
+    for (let button of [1, 2]) {
+      let type = spot.k[button];
+      if (NO_ACTION[type] || (type === 'Label_Move' && !spot.ac.Label)) continue;
+      let key = type + '|' + spot.ac.Id + '|' + (spot.k[3] || '') + '|' + (spot.k[4] || '');
+      if (seen[key]) continue;
+      seen[key] = true;
+      title = title || spot.ac.Id;
+      let name = type === 'Label_Custom_Item' ? (button === 1 ? 'Middle Click' : 'Right Click') : (TOUCH_NAMES[type] || type);
+      items.push({ text: name, click: () => { closePopup(); if (clickSpot(spot, button, x, y, true)) scheduleRender(); } });
+    }
+  }
+  if (items.length === 0) return false;
+  let r = cv.getBoundingClientRect();
+  showUiElement(buildContextMenu(title, items, -1), { x: r.left + x, y: r.top + y, touch: true, held: true });
+  return true;
 }
 
 // GetLabelOrientation: direction (22.5 degree steps) and leader length (0-2)
@@ -372,6 +452,9 @@ let pinch = null;      // { dist, range, ll }
 let quickPan = null;   // middle-drag: { centre, x, y }
 let tap = null;        // { x, y, t } of a touch that has not moved
 let lastTap = 0;
+let holdTimer = 0;     // a finger held still: the touch chooser
+
+function cancelHold() { clearTimeout(holdTimer); holdTimer = 0; }
 
 cv.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -383,8 +466,7 @@ function rightDown(x, y) {
   if (scaleMoving) { scaleRect = scaleMoving; scaleMoving = null; setInteractive(false); return; }
   if (labelMoving) { endLabelMove(x, y); return; }
 
-  let ac = trackAt(x, y, false);
-  if (ac && beginLabelMove(ac)) return;
+  if (dispatchClick(x, y, 2, false)) return;
   if (spotAt(x, y, 'atc')) { atcMoving = Object.assign({}, atcRect); setInteractive(true); return; }
   if (spotAt(x, y, 'scale')) { scaleMoving = Object.assign({}, scaleRect); setInteractive(true); return; }
   if (activeBrl !== -1) return;
@@ -398,6 +480,7 @@ function middleDown(x, y) {
   if (scaleMoving) { scaleMoving = null; setInteractive(false); return; }
   if (activeBrl !== -1) { brls.splice(activeBrl, 1); activeBrl = -1; setInteractive(false); return; }
   if (labelMoving) return;
+  if (dispatchClick(x, y, 1, false)) return;
   if (spotAt(x, y, 'scale')) { scaleMoving = Object.assign({}, scaleRect); setInteractive(true); return; }
   quickPan = { centre: centre, x: x, y: y };
   setInteractive(true);
@@ -415,6 +498,7 @@ cv.addEventListener('pointerdown', e => {
     if (activeBrl !== -1) { placeBrl(x, y, false); scheduleRender(); return; }
     let spot = spotAt(x, y, 'brl');
     if (spot) { activeBrl = spot.value; brls[activeBrl].endId = null; setInteractive(true); scheduleRender(); return; }
+    if (dispatchClick(x, y, 0, false)) { scheduleRender(); return; }
     if (movingSomething()) return;
     pan = { x: x, y: y };
     pointers.set(e.pointerId, { x: x, y: y });
@@ -427,7 +511,16 @@ cv.addEventListener('pointerdown', e => {
     tap = { x: x, y: y, t: Date.now() };
     pan = movingSomething() ? null : { x: x, y: y };
     pinch = null;
+    cancelHold();
+    if (!movingSomething()) {
+      holdTimer = setTimeout(() => {
+        holdTimer = 0;
+        if (!tap || pointers.size !== 1 || movingSomething()) return;
+        if (openTouchChooser(tap.x, tap.y)) { tap = null; pan = null; }
+      }, 500);
+    }
   } else if (pointers.size === 2) {
+    cancelHold();
     tap = null; pan = null;
     let pts = [...pointers.values()];
     let mx = (pts[0].x + pts[1].x) / 2, my = (pts[0].y + pts[1].y) / 2;
@@ -456,7 +549,7 @@ cv.addEventListener('pointermove', e => {
 
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, { x: x, y: y });
-  if (tap && Math.hypot(x - tap.x, y - tap.y) > 8) tap = null;
+  if (tap && Math.hypot(x - tap.x, y - tap.y) > 8) { tap = null; cancelHold(); }
 
   if (pointers.size === 1 && pan && !movingSomething()) {
     if (e.pointerType === 'mouse' || !tap) {
@@ -483,15 +576,15 @@ function pointerEnd(e) {
     quickPan = null; setInteractive(false); scheduleRender();
   }
   let had = pointers.delete(e.pointerId);
+  cancelHold();
   if (e.pointerType !== 'mouse' && had && e.type === 'pointerup') {
     if (labelMoving && pointers.size === 0) { endLabelMove(x, y); scheduleRender(); }
     else if (activeBrl !== -1 && pointers.size === 0) { placeBrl(x, y, true); scheduleRender(); }
     else if (atcMoving) { atcRect = atcMoving; atcMoving = null; setInteractive(false); scheduleRender(); }
     else if (scaleMoving) { scaleRect = scaleMoving; scaleMoving = null; setInteractive(false); scheduleRender(); }
     else if (tap && Date.now() - tap.t < 500) {
-      let now = Date.now();
-      let ac = trackAt(x, y, true), spot;
-      if (ac && beginLabelMove(ac)) { }
+      let now = Date.now(), spot;
+      if (dispatchClick(x, y, 0, true)) { lastTap = 0; }
       else if ((spot = spotAt(x, y, 'brl'))) { activeBrl = spot.value; brls[activeBrl].endId = null; setInteractive(true); }
       else if (spotAt(x, y, 'atc')) { atcMoving = Object.assign({}, atcRect); setInteractive(true); }
       else if (spotAt(x, y, 'scale')) { scaleMoving = Object.assign({}, scaleRect); setInteractive(true); }
@@ -523,7 +616,13 @@ cv.addEventListener('wheel', e => {
   scheduleRender();
 }, { passive: false });
 
-cv.addEventListener('dblclick', e => { if (e.button === 0 && !movingSomething()) { defaultView(); scheduleRender(); } });
+cv.addEventListener('dblclick', e => {
+  if (e.button !== 0 || movingSomething()) return;
+  // Two clicks on a track or label item are two clicks on it, not a double-click on the map
+  let m = clientPoint(e);
+  if (spotsUnder(m[0], m[1], 0, false).length > 0) return;
+  defaultView(); scheduleRender();
+});
 
 /* ============================================================
    Data

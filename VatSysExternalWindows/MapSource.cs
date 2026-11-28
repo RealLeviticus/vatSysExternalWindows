@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -447,6 +448,30 @@ internal static class GuiThread
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>Runs <paramref name="work"/> on the GUI thread and returns its
+    /// result, or <paramref name="fallback"/> if it had not finished within
+    /// <paramref name="waitMs"/> (the work may still complete later).</summary>
+    public static T Call<T>(Func<T> work, int waitMs, T fallback)
+    {
+        var done = new ManualResetEventSlim(false);
+        var box = new StrongBox<T>(fallback);
+        var finished = false;
+        try
+        {
+            MMI.InvokeOnGUI(delegate
+            {
+                try { box.Value = work(); Volatile.Write(ref finished, true); }
+                catch { }
+                finally { try { done.Set(); } catch { } }
+            });
+            return done.Wait(waitMs) && Volatile.Read(ref finished) ? box.Value! : fallback;
+        }
+        catch
+        {
+            return fallback;
         }
     }
 }

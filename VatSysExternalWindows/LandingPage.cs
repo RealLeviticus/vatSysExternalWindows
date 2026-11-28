@@ -27,8 +27,9 @@ a.btn:active{background:#000060;color:#c8ffc8;}
   <div class='buttons'>
     <a class='btn' href='/ground'>Ground<br>Window</a>
     <a class='btn' href='/asd'>Air<br>Window</a>
+    <a class='btn' href='/ozstrips'>OzStrips</a>
   </div>
-  <div class='subtitle'>Select a window type to display</div>
+  <div class='subtitle'>Select a window to display</div>
 </div>
 </body>
 </html>";

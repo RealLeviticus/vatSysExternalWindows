@@ -37,6 +37,8 @@ public sealed class TrackDto
     /// <summary>The marker's symbol type (SRPTimeMarker or SRPDistanceMarker).</summary>
     public string? SrpSym { get; set; }
     public LabelDto? Label { get; set; }
+    /// <summary>The track has no clickspot (a cancelled radar track).</summary>
+    public bool NoClick { get; set; }
 }
 
 public sealed class TrackSymbolDto

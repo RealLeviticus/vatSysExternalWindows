@@ -57,6 +57,10 @@ public sealed class LabelCellDto
     public int W { get; set; }
     /// <summary>Background fill colour, or null.</summary>
     public int[]? Back { get; set; }
+    /// <summary>The item's clickspot, or null: [left, middle, right, id, custom] —
+    /// the MMI.ClickspotTypes name for each mouse button ("" for none), the
+    /// clickspot Id (a toggle line id) and, for another plugin's item, its type.</summary>
+    public string[]? K { get; set; }
     public List<LabelRunDto> Runs { get; set; } = new();
 }
 
@@ -102,22 +106,8 @@ internal static class TrackLabelBuilder
 
         // Alert selection, exactly as PaintLabel does it
         var alerts = VatSysInternals.GetAlerts(tl);
-        var alert = alerts.FirstOrDefault(a => !a.Cancelled && a.Type != AlertTypes.EMG && a.Type != AlertTypes.RAD);
-        var alert2 = alerts.FirstOrDefault(a => !a.Cancelled && (a.Type == AlertTypes.EMG || a.Type == AlertTypes.RAD));
+        var alert3 = SelectAlert(alerts, out var alert, out var alert2);
         var alert4 = alerts.OrderBy(a => a.Priority).FirstOrDefault();
-        AlertInfo? alert3 = null;
-        if ((alert != null && alert2 != null && !alert.Inhibited && alert.Priority < alert2.Priority) ||
-            (alert != null && alert2 != null && !alert.Inhibited && alert2.Inhibited) ||
-            (alert != null && alert2 == null))
-        {
-            alert3 = alert;
-        }
-        else if ((alert != null && alert2 != null && !alert2.Inhibited && alert2.Priority < alert.Priority) ||
-                 (alert != null && alert2 != null && !alert2.Inhibited && alert.Inhibited) ||
-                 (alert2 != null && alert == null))
-        {
-            alert3 = alert2;
-        }
 
         var ownSector = false;
         try { ownSector = alert4 != null && fdr != null && MMI.SectorsControlled.Contains(fdr.ControllingSector); } catch { }
@@ -179,10 +169,34 @@ internal static class TrackLabelBuilder
         return label;
     }
 
+    /// <summary>PaintLabel's alert selection: the warning and the emergency shown
+    /// in the label, and (returned) the one the alert box and the Label_Warning /
+    /// Label_Emerg clickspots act on.</summary>
+    public static AlertInfo? SelectAlert(List<AlertInfo> alerts, out AlertInfo? alert, out AlertInfo? alert2)
+    {
+        var warning = alerts.FirstOrDefault(a => !a.Cancelled && a.Type != AlertTypes.EMG && a.Type != AlertTypes.RAD);
+        var emergency = alerts.FirstOrDefault(a => !a.Cancelled && (a.Type == AlertTypes.EMG || a.Type == AlertTypes.RAD));
+        alert = warning;
+        alert2 = emergency;
+        if ((warning != null && emergency != null && !warning.Inhibited && warning.Priority < emergency.Priority) ||
+            (warning != null && emergency != null && !warning.Inhibited && emergency.Inhibited) ||
+            (warning != null && emergency == null))
+        {
+            return warning;
+        }
+        if ((warning != null && emergency != null && !emergency.Inhibited && emergency.Priority < warning.Priority) ||
+            (warning != null && emergency != null && !emergency.Inhibited && warning.Inhibited) ||
+            (emergency != null && warning == null))
+        {
+            return emergency;
+        }
+        return null;
+    }
+
     /// <summary>Flash-phase lines, or an empty list when nothing in them is painted.</summary>
     private static List<LabelLineDto> Remaining(List<LabelLineDto> lines)
     {
-        return lines.Exists(l => l.Cells.Count > 0) ? lines : new List<LabelLineDto>();
+        return lines.Exists(l => l.Cells.Exists(cell => cell.Back != null || cell.Runs.Count > 0)) ? lines : new List<LabelLineDto>();
     }
 
     private static bool IsLineVisible(LabelLineDef line, Track track, FDP2.FDR? fdr)
@@ -261,7 +275,8 @@ internal static class TrackLabelBuilder
             if (x > widest) widest = x;
             if (x == 0) continue;
 
-            row.Cells.RemoveAll(cell => cell.Back is null && cell.Runs.Count == 0);
+            // A cell with nothing painted in it is still sent when it can be clicked
+            row.Cells.RemoveAll(cell => cell.Back is null && cell.Runs.Count == 0 && cell.K is null);
             result.Add(row);
         }
 
@@ -300,12 +315,24 @@ internal static class TrackLabelBuilder
         var hasBack = backCol.HasValue;
         var border = item.Border;
 
+        // The item's clickspot. vatSys sets the Id from each button that has a
+        // click type in turn, so the last of them wins.
+        string[]? clicks = null;
+        if (item.LeftClick != "" || item.MiddleClick != "" || item.RightClick != "")
+        {
+            string? id = null;
+            if (item.LeftClick != "") id = item.ToggleLeft;
+            if (item.MiddleClick != "") id = item.ToggleMiddle;
+            if (item.RightClick != "") id = item.ToggleRight;
+            clicks = new[] { item.LeftClick, item.MiddleClick, item.RightClick, id ?? "", "" };
+        }
+
         x += item.LeftPadding;
         var start = x;
 
         LabelCellDto Cell(int width)
         {
-            var cell = new LabelCellDto { X = start, W = width };
+            var cell = new LabelCellDto { X = start, W = width, K = width > 0 ? clicks : null };
             row.Cells.Add(cell);
             x = start + width;
             return cell;
@@ -338,6 +365,20 @@ internal static class TrackLabelBuilder
                 // Items other plugins supply (strip bay, events, ...)
                 var custom = VatSysInternals.GetCustomLabelItem(item.UnknownType, tl, fdr, rt);
                 var text = "";
+                if (custom?.OnMouseClick != null)
+                {
+                    // The plugin's click handler sees every button first; the ones
+                    // the label definition leaves unset are its alone. (Without a
+                    // handler those do nothing in vatSys, so they are not sent.)
+                    const string plugin = "Label_Custom_Item";
+                    clicks = new[]
+                    {
+                        item.LeftClick != "" ? item.LeftClick : plugin,
+                        item.MiddleClick != "" ? item.MiddleClick : plugin,
+                        item.RightClick != "" ? item.RightClick : plugin,
+                        clicks?[3] ?? "", item.UnknownType,
+                    };
+                }
                 if (custom != null)
                 {
                     if (itemCol.A != 0)
